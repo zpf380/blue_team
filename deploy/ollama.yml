@@ -1,0 +1,24 @@
+# 可选：本地 Ollama（AI 降级通道）。单机 4C8G 下需权衡内存，默认不随生产栈启动。
+# 用法（先启动生产栈，再拉模型）：
+#   bash deploy/deploy.sh up
+#   docker compose -p blueteam -f deploy/ollama.yml up -d
+#   docker compose -p blueteam -f deploy/ollama.yml exec ollama ollama pull llama3
+# 后端 OLLAMA_BASE_URL=http://ollama:11434 已配置，AI 网关自动降级到本地模型。
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - bt-net
+
+networks:
+  # 复用生产栈网络，使 backend 可经 http://ollama:11434 访问
+  bt-net:
+    external: true
+
+volumes:
+  ollama_data:

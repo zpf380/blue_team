@@ -1,0 +1,87 @@
+# 蓝队业务管理系统 · 单机生产栈（4C8G）
+# 用法：
+#   cp deploy/.env.prod.example deploy/.env.prod && 编辑密钥
+#   bash deploy/deploy.sh up           # 首次部署（构建 + 启动 + 预置数据）
+#   bash deploy/deploy.sh status       # 查看状态
+#   bash deploy/deploy.sh logs backend # 查看日志
+#
+# 说明：
+#   - InfluxDB 未纳入（代码未使用）；Ollama 独立于 deploy/ollama.yml 按需启用。
+#   - 服务间走内部网络 bt-net，仅 frontend 暴露 80 端口对外。
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blueteam
+      POSTGRES_USER: blueteam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-blueteam_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blueteam -d blueteam"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [bt-net]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks: [bt-net]
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    networks: [bt-net]
+
+  backend:
+    build: ../backend
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      # 容器内服务发现：覆盖默认 localhost 连接串
+      DATABASE_URL: postgresql+asyncpg://blueteam:${POSTGRES_PASSWORD:-blueteam_pass}@postgres:5432/blueteam
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_SECURE: "false"
+      OLLAMA_BASE_URL: http://ollama:11434
+      # CORS：允许同源前端（Nginx 反代）与自定义域名
+      BACKEND_CORS_ORIGINS: '["http://localhost","${FRONTEND_ORIGIN:-http://localhost}"]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks: [bt-net]
+
+  frontend:
+    build: ../frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+    networks: [bt-net]
+
+networks:
+  bt-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
