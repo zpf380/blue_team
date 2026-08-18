@@ -49,8 +49,7 @@ blue-team-system/
     ├── deploy.sh                # 部署助手
     ├── start.sh                 # 一键完整启动（Docker→生产栈→公网隧道→健康验证）
     ├── tunnel.sh / tunnel.md    # Cloudflare 公网隧道管理 / 使用说明
-    ├── security_check.sh        # 安全自检（弱口令/密钥/头泄露/限流）
-    └── smoke*.sh                # 生产冒烟回归（smoke / course / patrol / leave）
+    └── security_check.sh        # 安全自检（弱口令/密钥/头泄露/限流）
 ```
 
 ## 快速启动（开发环境）
@@ -90,12 +89,22 @@ npm run dev        # http://localhost:5173
 | trainee02 | Bt@123456 | 训练学员 |
 | auditor01 | Bt@123456 | 审计员 |
 
+
+账号	角色	新口令
+admin	系统管理员	p!$4D_g%U%T?oZk1
+manager01	安全主管	*n0zivIFRZp4r&hr
+analyst01	安全分析师	hqBA*y%9KPZJAX0z
+trainee01	训练学员	xg6Qh6QvR@f-fIY*
+trainee02	训练学员	R4uN*XgzOikSN-%5
+auditor01	审计员	U$Y$j2f_g2fD&?%O
+
+
 ### 生产环境口令
 
 > 生产库 6 个默认账号的随机强口令**不写入本仓库**（避免公开泄露），保存在 `deploy/.env.prod` 与部署记录中；如需对外分享项目，口令一律放在本地环境变量里。
 > 这些字符含 `$`、`&`、`!` 等 shell 特殊字符，命令行中使用务必加单引号包裹。
 
-> **安全提示**：admin 角色强制 MFA，命令行登录会返回 `mfa_required=true`；自动化冒烟请使用 manager01 等非强制角色账号。
+> **安全提示**：admin 角色强制 MFA，命令行登录会返回 `mfa_required=true`；自动化操作请使用 manager01 等非强制角色账号。
 
 ## 已实现功能（全部阶段完成）
 
@@ -116,7 +125,7 @@ npm run dev        # http://localhost:5173
 - RBAC：角色白名单 + 权限点校验 + 数据范围过滤（all / sub_dept / dept / self）+ 按钮级 v-permission
 - 5 角色工作台：系统管理员 / 安全主管 / 安全分析师 / 训练学员 / 审计员
 - 前端：动态菜单 / 路由守卫 / 401 自动刷新 / WebSocket 实时推送
-- **后端测试 179/179 全绿**，生产冒烟回归全绿（smoke.sh 24/24 及专项冒烟）
+- **后端测试 179/179 全绿**
 
 ## 生产部署（单机 4C8G，Docker Compose）
 
