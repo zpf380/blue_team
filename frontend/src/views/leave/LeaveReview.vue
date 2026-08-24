@@ -11,7 +11,8 @@
       <el-button type="primary" @click="load">查询</el-button>
     </div>
 
-    <el-table :data="rows" v-loading="loading" border stripe>
+    <el-empty v-if="!rows.length && !loading" description="暂无待审批申请" />
+    <el-table v-else :data="rows" v-loading="loading" border stripe>
       <el-table-column prop="user_name" label="申请人" width="100" />
       <el-table-column prop="department_name" label="部门" min-width="110">
         <template #default="{ row }">{{ row.department_name || '—' }}</template>
@@ -79,6 +80,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { leaveApi } from '@/api/leaves'
+import { formatDateTime } from '@/utils/format'
 
 const rows = ref([])
 const total = ref(0)
@@ -96,7 +98,7 @@ const action = ref('approve')
 const note = ref('')
 
 function fmt(v) {
-  return v ? new Date(v).toLocaleString() : '—'
+  return formatDateTime(v)
 }
 
 async function load() {

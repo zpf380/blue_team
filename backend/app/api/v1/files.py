@@ -8,10 +8,11 @@ from fastapi import APIRouter, Depends, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_client_ip, get_current_user, get_user_agent
 from app.core.exceptions import AppError, ERR_INTERNAL, ERR_VALIDATION, ok_response
 from app.db.session import get_db
 from app.models import FileRecord, User
+from app.services.audit_log import record
 
 router = APIRouter(tags=["文件"])
 
@@ -51,8 +52,13 @@ async def upload_file(
     if ext not in _UPLOAD_ALLOWED_EXTS:
         allowed = "、".join(sorted(_UPLOAD_ALLOWED_EXTS))
         raise AppError(code=ERR_VALIDATION, message=f"不支持的文件类型 .{ext or '(无扩展名)'}（仅允许：{allowed}）")
+    # 先用 Content-Length 预检超限，避免大文件先全量读入内存
+    max_bytes = settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > max_bytes:
+        raise AppError(code=ERR_VALIDATION, message=f"文件超过 {settings.UPLOAD_MAX_SIZE_MB}MB 限制")
     data = await file.read()
-    if len(data) > settings.UPLOAD_MAX_SIZE_MB * 1024 * 1024:
+    if len(data) > max_bytes:
         raise AppError(code=ERR_VALIDATION, message=f"文件超过 {settings.UPLOAD_MAX_SIZE_MB}MB 限制")
     # MIME 软校验：扩展名白名单内的文件，Content-Type 明显不匹配也拒绝（改扩展名的可执行脚本）
     mime = (file.content_type or "").lower()
@@ -74,6 +80,13 @@ async def upload_file(
     except Exception as exc:  # MinIO 不可达等
         raise AppError(code=ERR_INTERNAL, message=f"文件上传失败（存储服务不可用）：{type(exc).__name__}")
 
-    session.add(FileRecord(user_id=user.id, filename=filename, object_key=object_key, url=url, size=len(data), mime_type=file.content_type))
+    fr = FileRecord(user_id=user.id, filename=filename, object_key=object_key, url=url, size=len(data), mime_type=file.content_type)
+    session.add(fr)
+    await session.flush()  # 先取 id 供审计 target_id
+    await record(
+        session, user, "file:upload", target_type="file", target_id=str(fr.id),
+        detail={"filename": filename, "size": len(data), "mime_type": file.content_type},
+        ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
+    )
     await session.commit()
     return ok_response(data={"url": url, "filename": filename, "size": len(data)})

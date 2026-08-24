@@ -2,7 +2,6 @@
 import datetime as dt
 
 import jwt
-import pytest
 
 from app.core.config import settings
 from app.core.security import (

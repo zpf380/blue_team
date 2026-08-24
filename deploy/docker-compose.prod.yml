@@ -6,7 +6,7 @@
 #   bash deploy/deploy.sh logs backend # 查看日志
 #
 # 说明：
-#   - InfluxDB 未纳入（代码未使用）；Ollama 独立于 deploy/ollama.yml 按需启用。
+#   - Ollama 独立于 deploy/ollama.yml 按需启用。
 #   - 服务间走内部网络 bt-net，仅 frontend 暴露 80 端口对外。
 services:
   postgres:

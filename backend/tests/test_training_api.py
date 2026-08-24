@@ -332,3 +332,97 @@ async def test_manage_update_and_delete_protection(client, test_session):
     finally:
         if course_id:
             await _purge_course(test_session, course_id)
+
+
+# ---------- 批次4：课程发布态守卫 ----------
+@pytest.mark.asyncio
+async def test_course_publish_state_machine(client, test_session):
+    """发布态守卫：已发布课程禁止重复发布/下线草稿/修改/加场景/改删场景；下线后恢复可编辑。"""
+    manager_t = await _login(client, "manager01")
+    course_id = None
+    scen_id = None
+    name = _uniq("状态机")
+    try:
+        # 建草稿 + 加场景
+        resp = await client.post("/api/v1/training/manage/courses", headers=_h(manager_t), json={"name": name})
+        assert resp.json()["code"] == 0, resp.json()
+        course_id = resp.json()["data"]["course_id"]
+        resp = await client.post(f"/api/v1/training/manage/courses/{course_id}/scenarios", headers=_h(manager_t),
+                                 json={"title": "场景A", "points": 20, "content": _mk_content()})
+        assert resp.json()["code"] == 0, resp.json()
+        scen_id = resp.json()["data"]["id"]
+
+        # 草稿不能下线
+        resp = await client.post(f"/api/v1/training/manage/courses/{course_id}/unpublish", headers=_h(manager_t))
+        assert resp.json()["code"] == 40900 and "无需下线" in resp.json()["message"]
+
+        # 发布
+        resp = await client.post(f"/api/v1/training/manage/courses/{course_id}/publish", headers=_h(manager_t))
+        assert resp.json()["code"] == 0
+
+        # 已发布：重复发布 / 修改课程 / 加场景 / 改场景 / 删场景 / 删课程 → 一律 409
+        resp = await client.post(f"/api/v1/training/manage/courses/{course_id}/publish", headers=_h(manager_t))
+        assert resp.json()["code"] == 40900 and "请勿重复发布" in resp.json()["message"]
+        resp = await client.put(f"/api/v1/training/manage/courses/{course_id}", headers=_h(manager_t), json={"name": name + "改"})
+        assert resp.json()["code"] == 40900 and "请先下线" in resp.json()["message"]
+        resp = await client.post(f"/api/v1/training/manage/courses/{course_id}/scenarios", headers=_h(manager_t),
+                                 json={"title": "场景B", "points": 10, "content": _mk_content()})
+        assert resp.json()["code"] == 40900
+        resp = await client.put(f"/api/v1/training/manage/scenarios/{scen_id}", headers=_h(manager_t), json={"points": 30})
+        assert resp.json()["code"] == 40900
+        resp = await client.delete(f"/api/v1/training/manage/scenarios/{scen_id}", headers=_h(manager_t))
+        assert resp.json()["code"] == 40900
+        resp = await client.delete(f"/api/v1/training/manage/courses/{course_id}", headers=_h(manager_t))
+        assert resp.json()["code"] == 40900
+
+        # 下线后恢复可编辑
+        resp = await client.post(f"/api/v1/training/manage/courses/{course_id}/unpublish", headers=_h(manager_t))
+        assert resp.json()["code"] == 0
+        resp = await client.put(f"/api/v1/training/manage/courses/{course_id}", headers=_h(manager_t), json={"name": name + "改"})
+        assert resp.json()["code"] == 0, resp.json()
+    finally:
+        if course_id:
+            await _purge_course(test_session, course_id)
+
+
+# ---------- 批次4：单活跃沙箱会话 ----------
+@pytest.mark.asyncio
+async def test_sandbox_single_active_session(client, test_session):
+    """单活跃沙箱：再开新场景旧会话被停用；命令/提交被停用会话均被拒绝。"""
+    from sqlalchemy import delete
+
+    from app.models import SandboxSession, TrainingProgress
+
+    t = await _login(client, "trainee01")
+    agents = (await client.get("/api/v1/training/agents", headers=_h(t))).json()["data"]
+    foundation = next(a for a in agents if a["code"] == "foundation")
+    detail = (await client.get(f"/api/v1/training/agents/{foundation['id']}", headers=_h(t))).json()["data"]
+    sc1, sc2 = detail["scenarios"][0], detail["scenarios"][1]
+    me = (await client.get("/api/v1/users/me", headers=_h(t))).json()["data"]
+    uid = me["id"]
+
+    try:
+        sid1 = (await client.post(f"/api/v1/training/scenarios/{sc1['id']}/start", headers=_h(t))).json()["data"]["session_id"]
+        sid2 = (await client.post(f"/api/v1/training/scenarios/{sc2['id']}/start", headers=_h(t))).json()["data"]["session_id"]
+        assert sid1 != sid2
+
+        s1 = await test_session.get(SandboxSession, sid1)
+        s2 = await test_session.get(SandboxSession, sid2)
+        assert s1 is not None and s1.is_active is False
+        assert s2 is not None and s2.is_active is True
+
+        # 被停用会话：命令 / 提交 → 40001
+        resp = await client.post(f"/api/v1/training/sandbox/{sid1}/command", headers=_h(t), json={"command": "ls"})
+        assert resp.json()["code"] == 40001, resp.json()
+        resp = await client.post(f"/api/v1/training/scenarios/{sc1['id']}/submit", headers=_h(t))
+        assert resp.json()["code"] == 40001, resp.json()
+
+        # 活跃会话仍可命令
+        resp = await client.post(f"/api/v1/training/sandbox/{sid2}/command", headers=_h(t), json={"command": "cat /var/log/auth.log"})
+        assert resp.json()["code"] == 0, resp.json()
+    finally:
+        await test_session.execute(delete(SandboxSession).where(SandboxSession.user_id == uid))
+        await test_session.execute(delete(TrainingProgress).where(
+            TrainingProgress.user_id == uid, TrainingProgress.scenario_id.in_([sc1["id"], sc2["id"]])
+        ))
+        await test_session.commit()

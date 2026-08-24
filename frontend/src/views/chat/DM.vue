@@ -31,6 +31,17 @@
       >
         <span class="dm-name">{{ c.real_name || c.username }}</span>
         <el-tag size="small" type="info">{{ c.role_name || '—' }}</el-tag>
+        <el-popconfirm
+          title="删除该联系人？"
+          confirm-button-text="删除"
+          cancel-button-text="取消"
+          width="200"
+          @confirm="removeContact(c)"
+        >
+          <template #reference>
+            <el-button link type="danger" size="small" class="del-btn" @click.stop>删除</el-button>
+          </template>
+        </el-popconfirm>
       </div>
     </div>
 
@@ -134,6 +145,20 @@ async function rejectReq(r) {
   }
 }
 
+async function removeContact(c) {
+  try {
+    await chatApi.removeContact(c.id)
+    ElMessage.success('已删除联系人')
+    if (activeContactId.value === c.id) {
+      activeContactId.value = null
+      activeChannel.value = null
+    }
+    await loadContacts()
+  } catch {
+    /* 错误提示已由拦截器处理 */
+  }
+}
+
 onMounted(async () => {
   await chat.loadChannels()
   await loadContacts()
@@ -152,6 +177,8 @@ onMounted(async () => {
 }
 .dm-item:hover { background: #f5f7fa; }
 .dm-item.active { background: #ecf5ff; }
+.del-btn { opacity: 0; transition: opacity 0.2s; }
+.dm-item:hover .del-btn { opacity: 1; }
 .dm-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .req-item {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;

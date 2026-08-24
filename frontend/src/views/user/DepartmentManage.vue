@@ -6,7 +6,8 @@
       <el-button v-permission="'department:manage'" type="success" @click="openDialog()">新增部门</el-button>
     </div>
 
-    <el-table :data="deptTree" v-loading="loading" row-key="id" border stripe default-expand-all>
+    <el-empty v-if="!deptTree.length && !loading" description="暂无部门" />
+    <el-table v-else :data="deptTree" v-loading="loading" row-key="id" border stripe default-expand-all>
       <el-table-column prop="name" label="部门名称" min-width="180" />
       <el-table-column label="上级部门" min-width="150">
         <template #default="{ row }">{{ parentName(row.parent_id) }}</template>

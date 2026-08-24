@@ -13,7 +13,8 @@
       <el-button type="success" @click="openDialog">发起申请</el-button>
     </div>
 
-    <el-table :data="rows" v-loading="loading" border stripe>
+    <el-empty v-if="!rows.length && !loading" description="暂无休假申请" />
+    <el-table v-else :data="rows" v-loading="loading" border stripe>
       <el-table-column label="类型" width="90">
         <template #default="{ row }">
           <el-tag size="small" :type="row.leave_type === 'on_leave' ? 'warning' : 'primary'">
@@ -78,7 +79,7 @@
           />
         </el-form-item>
         <el-form-item label="结束时间">
-          <el-date-picker v-model="form.end_at" type="datetime" placeholder="结束时间" style="width: 100%" />
+          <el-date-picker v-model="form.end_at" type="datetime" placeholder="结束时间" style="width: 100%" :disabled-date="endDisabled" />
         </el-form-item>
         <el-form-item label="事由">
           <el-input v-model="form.reason" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="请填写休假/外勤事由" />
@@ -96,6 +97,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { leaveApi } from '@/api/leaves'
+import { formatDateTime } from '@/utils/format'
 
 const rows = ref([])
 const total = ref(0)
@@ -110,7 +112,13 @@ const saving = ref(false)
 const form = reactive({ leave_type: 'on_leave', start_at: null, end_at: null, reason: '' })
 
 function fmt(v) {
-  return v ? new Date(v).toLocaleString() : '—'
+  return formatDateTime(v)
+}
+
+// 结束时间不可早于开始时间（未选开始则以当前时间为界）
+function endDisabled(d) {
+  const base = form.start_at || new Date()
+  return d.getTime() < base.getTime()
 }
 
 async function load() {

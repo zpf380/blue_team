@@ -2,7 +2,6 @@
 
 纯单测，不依赖数据库/网络：httpx 与 SMTP 全部 mock。
 """
-import pytest
 
 
 class _FakeResp:

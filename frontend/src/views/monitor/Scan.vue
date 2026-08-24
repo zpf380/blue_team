@@ -50,7 +50,20 @@
           </el-select>
         </el-form-item>
         <el-form-item label="端口数">
-          <el-input-number v-model="scanForm.ports" :min="1" :max="10000" placeholder="默认 100" style="width: 130px" />
+          <el-input-number v-model="scanForm.ports" :min="1" :max="10000" placeholder="默认 1000" style="width: 130px" />
+        </el-form-item>
+        <el-form-item label="端口范围">
+          <el-input v-model="scanForm.port_range" placeholder="如 22,80,443 或 1-1000（与端口数二选一）" style="width: 230px" />
+        </el-form-item>
+        <el-form-item label="扫描类型">
+          <el-select v-model="scanForm.scan_type" clearable placeholder="默认 SYN" style="width: 140px">
+            <el-option label="TCP SYN（sS）" value="sS" />
+            <el-option label="TCP Connect（sT）" value="sT" />
+            <el-option label="UDP（sU，较慢）" value="sU" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="NSE 漏洞脚本">
+          <el-checkbox v-model="scanForm.nse">真实漏洞探测</el-checkbox>
         </el-form-item>
         <el-form-item label="关联设备">
           <el-select v-model="scanForm.device_id" clearable filterable style="width: 200px">
@@ -76,7 +89,8 @@
         </div>
       </div>
 
-      <el-table :data="items" stripe>
+      <el-empty v-if="!items.length && !loading" description="暂无扫描报告，在左侧发起扫描后生成" />
+      <el-table v-else :data="items" stripe>
         <el-table-column prop="target_ip" label="目标 IP" min-width="130" />
         <el-table-column prop="device_name" label="关联设备" width="120">
           <template #default="{ row }">{{ row.device_name || '—' }}</template>
@@ -105,9 +119,11 @@
         <el-table-column label="时间" width="170">
           <template #default="{ row }">{{ fmt(row.generated_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="viewDetail(row)">详情</el-button>
+            <el-button v-if="['pending', 'running'].includes(row.scan_status)" link type="warning" @click="cancelScan(row)">取消</el-button>
+            <el-button v-else-if="row.scan_status === 'failed'" link type="primary" @click="retryScan(row)">重试</el-button>
             <template v-if="row.status === 'pending_review' && isReviewer">
               <el-button link type="success" @click="review(row, true)">通过</el-button>
               <el-button link type="danger" @click="review(row, false)">驳回</el-button>
@@ -149,8 +165,13 @@
           <el-descriptions-item label="目标 IP">{{ detail.target_ip }}</el-descriptions-item>
           <el-descriptions-item label="风险评分">{{ detail.risk_score ?? '—' }} / 100</el-descriptions-item>
           <el-descriptions-item label="报告类型">{{ typeText(detail.report_type) }}</el-descriptions-item>
+          <el-descriptions-item label="扫描类型">{{ scanTypeText(detail.scan_options?.scan_type) }}</el-descriptions-item>
           <el-descriptions-item label="扫描状态">
             <el-tag size="small" :type="scanStatusTag(detail.scan_status)">{{ scanStatusText(detail.scan_status) }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="端口范围">{{ portSpecText(detail.scan_options) }}</el-descriptions-item>
+          <el-descriptions-item v-if="detail.error_code" label="失败原因">
+            <el-tag size="small" type="danger">{{ errorCodeText(detail.error_code) }}</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="状态">
             <el-tag size="small" :type="statusTag(detail.status)">{{ statusText(detail.status) }}</el-tag>
@@ -171,14 +192,51 @@
         </el-space>
 
         <h4 class="sec">发现漏洞</h4>
+        <div class="vuln-legend">
+          <el-tag size="small" type="success" effect="dark">NSE 确认</el-tag>
+          <span>nmap --script vuln 主动探测确认，较可信</span>
+          <el-tag size="small" type="info" effect="dark">静态推断</el-tag>
+          <span>仅按端口套映射，需复扫或人工验证</span>
+        </div>
         <el-empty v-if="!(detail.scan_data?.vulnerabilities || []).length" description="未发现漏洞" :image-size="60" />
         <div v-else class="vuln-list">
           <div v-for="(v, i) in detail.scan_data.vulnerabilities" :key="i" class="vuln-row">
             <el-tag size="small" :type="sevTag(v.severity)">{{ sevText(v.severity) }}</el-tag>
-            <span class="vuln-name">{{ v.name }}</span>
+            <el-tooltip v-if="v.output" :content="v.output" placement="top" effect="light">
+              <span class="vuln-name">{{ v.name }}</span>
+            </el-tooltip>
+            <span v-else class="vuln-name">{{ v.name }}</span>
+            <span v-if="v.port" class="vuln-port">:{{ v.port }}</span>
             <span v-if="v.cve" class="vuln-cve">{{ v.cve }}</span>
+            <el-tag v-if="v.source" size="small" effect="dark" :type="v.source === 'nse' ? 'success' : 'info'">
+              {{ v.source === 'nse' ? 'NSE 确认' : '静态推断' }}
+            </el-tag>
+            <el-button v-if="v.source === 'static' && v.port" link type="primary" size="small" @click="rescanVerify(v)">复扫验证</el-button>
           </div>
         </div>
+
+        <h4 class="sec">基线漂移（与上次扫描对比）</h4>
+        <div v-if="detail.scan_data?.baseline_diff" class="drift-box">
+          <div v-if="(detail.scan_data.baseline_diff.new_ports || []).length" class="drift-line">
+            <span class="drift-label">🆕 新增端口</span>
+            <el-tag v-for="p in detail.scan_data.baseline_diff.new_ports" :key="'n' + p.port" size="small" type="danger">
+              {{ p.port }}/{{ p.protocol }} {{ p.service || '' }}
+            </el-tag>
+          </div>
+          <div v-if="(detail.scan_data.baseline_diff.closed_ports || []).length" class="drift-line">
+            <span class="drift-label">🚫 关闭端口</span>
+            <el-tag v-for="p in detail.scan_data.baseline_diff.closed_ports" :key="'c' + p.port" size="small" type="info">
+              {{ p.port }}/{{ p.protocol }}
+            </el-tag>
+          </div>
+          <div v-if="(detail.scan_data.baseline_diff.changed_services || []).length" class="drift-line">
+            <span class="drift-label">🔁 服务变化</span>
+            <el-tag v-for="p in detail.scan_data.baseline_diff.changed_services" :key="'s' + p.port" size="small" type="warning">
+              {{ p.port }}: {{ p.previous_service || '未知' }} → {{ p.service || '未知' }}
+            </el-tag>
+          </div>
+        </div>
+        <el-empty v-else description="首次扫描或与上次无差异" :image-size="50" />
 
         <h4 class="sec">摘要</h4>
         <p class="summary">{{ detail.summary }}</p>
@@ -193,7 +251,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { monitorApi } from '@/api/monitor'
 import { useUserStore } from '@/stores/user'
 
-const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN') : '—')
+import { formatDateTime as fmt } from '@/utils/format'
 const typeText = (t) => ({ daily: '日报', weekly: '周报', monthly: '月报', on_demand: '按需' }[t] || t)
 const statusText = (s) => ({ pending_review: '待审核', approved: '已通过', rejected: '已驳回' }[s] || s)
 const statusTag = (s) => ({ pending_review: 'warning', approved: 'success', rejected: 'danger' }[s] || 'info')
@@ -202,6 +260,13 @@ const scanStatusTag = (s) => ({ pending: 'info', running: 'warning', completed: 
 const sevText = (v) => ({ critical: '严重', high: '高危', medium: '中危', low: '低危', info: '提示' }[v] || v)
 const sevTag = (v) => ({ critical: 'danger', high: 'danger', medium: 'warning', low: 'info', info: 'info' }[v] || 'info')
 const riskColor = (score) => (score >= 70 ? '#f56c6c' : score >= 40 ? '#e6a23c' : '#67c23a')
+const scanTypeText = (t) => ({ sS: 'TCP SYN', sT: 'TCP Connect', sU: 'UDP' }[t] || t || '—')
+const portSpecText = (o) => {
+  if (!o) return '—'
+  if (o.port_range) return o.port_range
+  return o.top_ports ? `top ${o.top_ports}` : '默认'
+}
+const errorCodeText = (c) => ({ cancelled: '已取消', timeout: '执行超时', permission: '权限不足', unreachable: '目标不可达', generic: '未知错误' }[c] || c)
 
 const userStore = useUserStore()
 const isReviewer = computed(() => ['manager', 'admin'].includes(userStore.role))
@@ -212,7 +277,7 @@ const items = ref([])
 const total = ref(0)
 const query = reactive({ page: 1, size: 10, status: '' })
 const devices = ref([])
-const scanForm = reactive({ target_ip: '', report_type: 'on_demand', device_id: null, ports: null })
+const scanForm = reactive({ target_ip: '', report_type: 'on_demand', device_id: null, ports: null, port_range: '', scan_type: '', nse: true })
 
 let pollTimer = null
 let pollReportId = null
@@ -284,8 +349,13 @@ async function loadDevices() {
 }
 
 async function runScan() {
-  if (!scanForm.target_ip.trim()) {
+  const ip = scanForm.target_ip.trim()
+  if (!ip) {
     ElMessage.warning('请输入目标 IP')
+    return
+  }
+  if (!/^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/.test(ip)) {
+    ElMessage.warning('目标 IP 格式不正确，请输入 IPv4 地址（如 10.0.10.11）')
     return
   }
   if (scanning.value) return  // 扫描中防重复提交
@@ -295,7 +365,10 @@ async function runScan() {
       target_ip: scanForm.target_ip.trim(),
       report_type: scanForm.report_type,
       device_id: scanForm.device_id || undefined,
-      ports: scanForm.ports || undefined
+      ports: scanForm.ports || undefined,
+      port_range: scanForm.port_range.trim() || undefined,
+      scan_type: scanForm.scan_type || undefined,
+      nse: scanForm.nse
     })
     stopPolling()
     pollReportId = data.report_id
@@ -348,6 +421,53 @@ async function review(row, approve) {
   } catch { /* 取消或失败 */ }
 }
 
+async function cancelScan(row) {
+  try {
+    await ElMessageBox.confirm(`确认取消目标「${row.target_ip}」的扫描任务？`, '取消扫描', { type: 'warning' })
+    if (pollReportId === row.id) stopPolling()
+    await monitorApi.cancelScan(row.id)
+    ElMessage.success('扫描已取消')
+    load()
+  } catch { /* 取消或失败 */ }
+}
+
+async function retryScan(row) {
+  try {
+    await ElMessageBox.confirm(`确认重新扫描「${row.target_ip}」？将沿用原扫描选项（类型/端口/NSE）。`, '重试扫描', { type: 'warning' })
+    const data = await monitorApi.retryScan(row.id)
+    stopPolling()
+    pollReportId = data.report_id
+    pollTries = 0
+    scanning.value = false
+    ElMessage.info('扫描已重新提交，后台执行中…')
+    pollTimer = setInterval(pollScan, 2000)
+    load()
+  } catch { /* 取消或失败 */ }
+}
+
+// 对静态推断的高危项发起定向 NSE 复扫（只扫该端口），确认漏洞是否真实存在
+async function rescanVerify(v) {
+  const ip = detail.value?.target_ip
+  if (!ip || !v.port) return
+  try {
+    await ElMessageBox.confirm(
+      `对 ${ip} 的端口 ${v.port} 发起定向 NSE 复扫，以确认「${v.name}」是否真实存在？\n将只扫描该端口（port_range=${v.port}），结果会标注为 NSE 确认/未发现。`,
+      '定向复扫验证', { type: 'warning' }
+    )
+    const data = await monitorApi.createScan({
+      target_ip: ip,
+      port_range: String(v.port),
+      nse: true,
+      report_type: 'on_demand'
+    })
+    stopPolling()
+    pollReportId = data.report_id
+    pollTries = 0
+    ElMessage.info('定向复扫已提交，NSE 脚本会主动探测该端口')
+    pollTimer = setInterval(pollScan, 2000)
+  } catch { /* 取消或失败 */ }
+}
+
 onMounted(() => { load(); loadDevices(); loadAuths() })
 onBeforeUnmount(stopPolling)
 </script>
@@ -371,4 +491,10 @@ onBeforeUnmount(stopPolling)
 .summary { color: #606266; font-size: 13px; margin: 0; }
 .risk-wait { color: #c0c4cc; }
 .err-box { margin-top: 12px; }
+.drift-box { display: flex; flex-direction: column; gap: 8px; }
+.drift-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.drift-label { font-size: 13px; color: #606266; white-space: nowrap; }
+.vuln-legend { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #909399; margin: 4px 0 10px; }
+.vuln-port { color: #909399; font-size: 12px; }
+.vuln-row { flex-wrap: wrap; }
 </style>

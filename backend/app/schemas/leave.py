@@ -14,22 +14,3 @@ class LeaveCreate(BaseModel):
 
 class LeaveReviewIn(BaseModel):
     note: Optional[str] = Field(default=None, max_length=255)
-
-
-class LeaveOut(BaseModel):
-    model_config = {"from_attributes": True}
-    id: int
-    user_id: int
-    user_name: Optional[str] = None
-    department_name: Optional[str] = None
-    leave_type: str
-    start_at: dt.datetime
-    end_at: dt.datetime
-    reason: Optional[str] = None
-    status: str
-    approver_id: Optional[int] = None
-    approver_name: Optional[str] = None
-    reviewed_note: Optional[str] = None
-    reviewed_at: Optional[dt.datetime] = None
-    completed_at: Optional[dt.datetime] = None
-    created_at: dt.datetime

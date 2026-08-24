@@ -60,12 +60,18 @@ class Settings(BaseSettings):
     AI_MAX_HISTORY_ROUNDS: int = 10  # 同一会话保留最近 N 轮
 
     # 漏洞扫描（nmap）
-    NMAP_TOP_PORTS: int = 100             # --top-ports N（未指定端口时的默认扫描范围）
+    NMAP_TOP_PORTS: int = 1000            # --top-ports N（未指定端口时的默认扫描范围；1000 与常见 nmapGUI top-1000 覆盖一致）
     NMAP_TIMEOUT_SECONDS: int = 90        # --host-timeout + Python 侧硬超时
     NMAP_VERSION_DETECT: bool = True      # -sV 版本探测开关（可给 open_ports 补 service/product/version）
     NMAP_SCAN_TYPE: str = "sS"            # sS（SYN，需 CAP_NET_RAW）/ sT（connect，非 root 场景备选）
     NMAP_HOST_TIMEOUT: int = 30           # 主机发现 --host-timeout（单主机探测超时，秒）
     SCAN_MAX_CONCURRENT: int = 3          # 同时在跑的 nmap 子进程上限（扫描 + 发现共享），防高并发拖垮服务器
+    # NSE 漏洞脚本（真实 CVE 检测）：""=全局关闭；"vuln"=nmap 自带离线漏洞签名（默认，不依赖外网）；
+    # "vulners"=联网查 CVE（需扫描机可访问 vulners.com）；也支持逗号分隔脚本名/类别
+    NMAP_NSE_SCRIPTS: str = "vuln"
+    NMAP_UDP_TOP_PORTS: int = 20          # UDP 扫描（sU）默认端口数（UDP 慢，取小值）
+    NMAP_UDP_TIMEOUT_SECONDS: int = 300   # UDP 扫描专属 --host-timeout（更保守）
+    NMAP_MAX_PORTS_IN_RANGE: int = 1024   # port_range 展开后端口数上限，防 "1-65535" 全端口 DoS
 
     # 告警外部通知（留空 = 关闭该渠道；配置在 deploy/.env.prod）
     ALERT_NOTIFY_WEBHOOK_URL: str = ""    # 企业微信/钉钉机器人 webhook，或通用回调 URL

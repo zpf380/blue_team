@@ -12,7 +12,8 @@
         </div>
       </div>
 
-      <el-table :data="subnets" stripe>
+      <el-empty v-if="!subnets.length && !subnetLoading" description="暂无子网，点击「新增子网」登记网段规划" />
+      <el-table v-else :data="subnets" stripe>
         <el-table-column prop="name" label="子网名称" min-width="120" />
         <el-table-column prop="network" label="网段" min-width="120" />
         <el-table-column prop="gateway" label="网关" width="120" />
@@ -59,7 +60,8 @@
         </div>
       </div>
 
-      <el-table :data="allocs" stripe>
+      <el-empty v-if="!allocs.length && !allocLoading" description="暂无地址分配，点击「分配地址」登记 IP 用途" />
+      <el-table v-else :data="allocs" stripe>
         <el-table-column prop="ip_address" label="IP 地址" min-width="125" />
         <el-table-column prop="subnet_name" label="所属子网" min-width="130" />
         <el-table-column label="类型" width="85">
@@ -260,7 +262,7 @@
             <el-option v-for="s in subnets" :key="s.id" :label="`${s.name}（${s.network}）`" :value="s.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="IP 地址">
+        <el-form-item label="IP 地址" prop="ip_address">
           <el-input v-model="allocForm.ip_address" placeholder="留空自动分配" />
         </el-form-item>
         <el-form-item label="分配类型">
@@ -391,9 +393,9 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { monitorApi } from '@/api/monitor'
 import { userApi } from '@/api/users'
-import http from '@/api/http'
+import { departmentApi } from '@/api/departments'
 
-const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN') : '—')
+import { formatDateTime as fmt } from '@/utils/format'
 const allocText = (t) => ({ static: '静态', dhcp: 'DHCP', reserved: '保留' }[t] || t)
 const allocTag = (t) => ({ static: 'success', dhcp: 'primary', reserved: 'warning' }[t] || 'info')
 const pct = (row) => (row.capacity ? Math.min(100, Math.round((row.used / row.capacity) * 100)) : 0)
@@ -407,7 +409,20 @@ const parseCidr = (s) => {
   const [ip, p] = String(s).split('/')
   const prefix = parseInt(p, 10)
   if (!ip || isNaN(prefix) || prefix < 0 || prefix > 32) return null
+  const parts = ip.split('.')
+  if (parts.length !== 4 || parts.some((x) => !/^\d{1,3}$/.test(x) || Number(x) > 255)) return null
   return { int: ipToInt(ip), prefix }
+}
+const isIPv4 = (v) => /^\d{1,3}(\.\d{1,3}){3}$/.test(v) && v.split('.').every((x) => Number(x) <= 255)
+const cidrValidator = (_rule, value, callback) => {
+  if (!value) return callback()
+  if (!parseCidr(value)) return callback(new Error('网段格式不正确，如 10.0.30.0/24'))
+  callback()
+}
+const ipValidator = (_rule, value, callback) => {
+  if (!value) return callback()
+  if (!isIPv4(value)) return callback(new Error('IP 地址格式不正确'))
+  callback()
 }
 const ipInNet = (ipInt, net) => ipInt >= net.int && ipInt < net.int + 2 ** (32 - net.prefix)
 const parseReservedText = (text) =>
@@ -443,7 +458,10 @@ const subnetFormRef = ref()
 const subnetForm = reactive({ name: '', network: '', department_id: null, reserved_ranges_text: '' })
 const subnetRules = {
   name: [{ required: true, message: '请输入子网名称', trigger: 'blur' }],
-  network: [{ required: true, message: '请输入网段', trigger: 'blur' }]
+  network: [
+    { required: true, message: '请输入网段', trigger: 'blur' },
+    { validator: cidrValidator, trigger: 'blur' }
+  ]
 }
 const subnetDelVisible = ref(false)
 const subnetDelTarget = ref(null)
@@ -460,7 +478,10 @@ const savingAlloc = ref(false)
 const recycling = ref(false)
 const allocFormRef = ref()
 const allocForm = reactive({ subnet_id: null, ip_address: '', allocation_type: 'static', purpose: '', allocated_to: null, device_id: null })
-const allocRules = { subnet_id: [{ required: true, message: '请选择子网', trigger: 'change' }] }
+const allocRules = {
+  subnet_id: [{ required: true, message: '请选择子网', trigger: 'change' }],
+  ip_address: [{ validator: ipValidator, trigger: 'blur' }]
+}
 
 const allocEditVisible = ref(false)
 const allocEditTarget = ref(null)
@@ -563,7 +584,7 @@ async function loadAlloc() {
 
 async function loadOptions() {
   try {
-    const roots = await http.get('/departments/tree')
+    const roots = await departmentApi.tree()
     const flat = []
     const walk = (nodes, depth = 0) => {
       nodes.forEach((n) => {
@@ -625,6 +646,7 @@ function openEditSubnet(row) {
 
 async function saveEditSubnet() {
   if (!subnetEditForm.name) { ElMessage.warning('子网名称不能为空'); return }
+  if (subnetEditForm.gateway && !isIPv4(subnetEditForm.gateway)) { ElMessage.warning('网关 IP 格式不正确'); return }
   savingSubnetEdit.value = true
   try {
     await monitorApi.updateSubnet(subnetEditTarget.value.id, {

@@ -69,9 +69,27 @@ def purge_test_subnet_residue(db_available):
             await conn.execute(text(
                 "DELETE FROM ip_allocations WHERE ip_address::text LIKE '10.2%' OR ip_address::text LIKE '172.16%'"
             ))
-            # 测试网段设备（网络发现/巡检测试创建）同样清掉，防跨运行累积（名称/状态断言撞车）
+            # 测试自身未清理的残留分配（数据范围测试在 seed 办公网 10.0.0.x 上逐次新建、不删）：
+            # 随机 IP 撞旧残留 → 409 → flaky。按目的标签兜底清理（seed 静态分配不含此标签，不受影响）
+            await conn.execute(text("DELETE FROM ip_allocations WHERE purpose = '数据范围测试'"))
+            # 扫描自动告警残留（target 为随机测试网段，未清理则随机 target 撞旧告警 → dedup 短路 → flaky）。
+            # 只清「扫描发现高风险」这一扫描自动生成的告警，人工/手动告警不受影响
+            await conn.execute(text("DELETE FROM alerts WHERE title LIKE '扫描发现高风险：%'"))
+            # 测试网段设备（网络发现/巡检测试创建）同样清掉，防跨运行累积（名称/状态断言撞车）；
+            # 10.7% 为 devices_import_csv 的导入测试网段（测试自清理 + 此处兜底）；
+            # 10.0.99% 为 _uniq_ip() 设备测试专用网段（测试正常自清理，此处兜底被中断的运行残留）
+            # 先删 10.0.99% 设备被引用记录（归档删除保护测试可能残留 scan_report 引用），再删设备
             await conn.execute(text(
-                "DELETE FROM devices WHERE ip_address::text LIKE '10.2%' OR ip_address::text LIKE '172.16%'"
+                "DELETE FROM scan_reports WHERE device_id IN (SELECT id FROM devices WHERE ip_address::text LIKE '10.0.99.%')"
+            ))
+            await conn.execute(text(
+                "DELETE FROM alerts WHERE device_id IN (SELECT id FROM devices WHERE ip_address::text LIKE '10.0.99.%')"
+            ))
+            await conn.execute(text(
+                "DELETE FROM ip_allocations WHERE device_id IN (SELECT id FROM devices WHERE ip_address::text LIKE '10.0.99.%')"
+            ))
+            await conn.execute(text(
+                "DELETE FROM devices WHERE ip_address::text LIKE '10.2%' OR ip_address::text LIKE '172.16%' OR ip_address::text LIKE '10.7.%' OR ip_address::text LIKE '10.0.99.%'"
             ))
             await conn.execute(text(
                 "DELETE FROM ip_subnets WHERE network::text LIKE '10.2%' OR network::text LIKE '172.16%'"

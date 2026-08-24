@@ -42,10 +42,7 @@
         </div>
       </el-form>
 
-      <div class="hint">
-        管理员 admin / admin123（首次登录需绑定 MFA）<br />
-        演示账号 manager01 · analyst01 · trainee01 · auditor01 / Bt@123456
-      </div>
+      <div class="hint">首次登录请使用管理员分配的用户名与口令</div>
     </el-card>
   </div>
 </template>
@@ -70,7 +67,7 @@ const mfaCode = ref('')
 const mfaToken = ref('')
 const otpauth = ref({ secret: '', otpauth_url: '' })
 const qrImage = ref('')
-const form = reactive({ username: 'admin', password: '', captcha_id: '', captcha_code: '' })
+const form = reactive({ username: '', password: '', captcha_id: '', captcha_code: '' })
 
 async function loadCaptcha() {
   const data = await authApi.captcha()

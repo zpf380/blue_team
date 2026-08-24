@@ -6,7 +6,7 @@ export const monitorApi = {
   devices: (params) => http.get('/monitor/devices', { params }),
   createDevice: (data) => http.post('/monitor/devices', data),
   updateDevice: (id, data) => http.put(`/monitor/devices/${id}`, data),
-  deleteDevice: (id, data) => http.delete(`/monitor/devices/${id}`, { data }),
+  deleteDevice: (id, data) => http.delete(`/monitor/devices/${id}`, { params: { reason: data?.reason } }),
   pingDevice: (id) => http.post(`/monitor/devices/${id}/ping`),
   exportDevices: () => http.get('/monitor/devices/export', { responseType: 'blob' }),
   importDevices: (formData) => http.post('/monitor/devices/import', formData),
@@ -15,7 +15,7 @@ export const monitorApi = {
   subnets: () => http.get('/monitor/subnets'),
   createSubnet: (data) => http.post('/monitor/subnets', data),
   updateSubnet: (id, data) => http.put(`/monitor/subnets/${id}`, data),
-  deleteSubnet: (id, data) => http.delete(`/monitor/subnets/${id}`, { data }),
+  deleteSubnet: (id, data) => http.delete(`/monitor/subnets/${id}`, { params: { reason: data?.reason } }),
   subnetUsage: (id) => http.get(`/monitor/subnets/${id}/usage`),
   allocations: (params) => http.get('/monitor/allocations', { params }),
   createAllocation: (data) => http.post('/monitor/allocations', data),
@@ -30,9 +30,6 @@ export const monitorApi = {
   discoveries: (params) => http.get('/monitor/discover', { params }),
   registerDiscovery: (id, data) => http.post(`/monitor/discover/${id}/register`, data),
 
-  // 设备自动巡检（后台定时刷新设备状态）
-  patrols: (params) => http.get('/monitor/patrols', { params }),
-
   // 告警
   alerts: (params) => http.get('/monitor/alerts', { params }),
   createAlert: (data) => http.post('/monitor/alerts', data),
@@ -44,6 +41,8 @@ export const monitorApi = {
   scanReports: (params) => http.get('/monitor/scans/reports', { params }),
   scanReport: (id) => http.get(`/monitor/scans/reports/${id}`),
   reviewScanReport: (id, approve) => http.post(`/monitor/scans/reports/${id}/review`, null, { params: { approve } }),
+  cancelScan: (id) => http.post(`/monitor/scans/reports/${id}/cancel`),
+  retryScan: (id) => http.post(`/monitor/scans/reports/${id}/retry`),
 
   // 扫描授权名单
   scanAuths: () => http.get('/monitor/scan-auth'),

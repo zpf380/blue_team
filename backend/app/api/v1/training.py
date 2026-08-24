@@ -6,10 +6,10 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user, get_client_ip, get_user_agent, require_permission
+from app.core.dependencies import get_client_ip, get_user_agent, require_permission
 from app.core.exceptions import AppError, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_VALIDATION, ok_response
 from app.db.session import get_db
-from app.models import Department, Role, SandboxSession, ScoreRecord, TrainingAgent, TrainingProgress, TrainingScenario, User, UserBadge, Badge
+from app.models import Department, SandboxSession, ScoreRecord, TrainingAgent, TrainingProgress, TrainingScenario, User, UserBadge, Badge
 from app.schemas.training import SandboxCommandIn
 from app.services import badge_service, sandbox_service
 from app.services.audit_log import record
@@ -165,6 +165,14 @@ async def start_scenario(
         session.add(progress)
     await session.flush()
 
+    # 单活跃沙箱：先停用该用户其他进行中的会话（含同场景旧会话），新会话成为唯一活跃会话
+    from sqlalchemy import update
+
+    await session.execute(
+        update(SandboxSession)
+        .where(SandboxSession.user_id == user.id, SandboxSession.is_active.is_(True))
+        .values(is_active=False)
+    )
     sid = _session_id()
     s = SandboxSession(
         id=sid, user_id=user.id, agent_id=sc.agent_id, scenario_id=scenario_id,
@@ -217,6 +225,9 @@ async def submit_scenario(
     user: User = Depends(require_permission("training:sandbox")),
 ):
     sc = await _scenario_or_404(session, scenario_id)
+    agent = await session.get(TrainingAgent, sc.agent_id) if sc.agent_id else None
+    if not agent or agent.status != "published":
+        raise AppError(code=ERR_VALIDATION, message="场景已下线，无法提交")
     progress = (await session.execute(
         select(TrainingProgress).where(TrainingProgress.user_id == user.id, TrainingProgress.scenario_id == scenario_id)
     )).scalar_one_or_none()
@@ -226,6 +237,8 @@ async def submit_scenario(
         return ok_response(data={"score": progress.score, "status": progress.status, "earned_badges": [], "already_submitted": True})
 
     s = await session.get(SandboxSession, progress.sandbox_session_id) if progress.sandbox_session_id else None
+    if s and not s.is_active:
+        raise AppError(code=ERR_VALIDATION, message="沙箱会话已结束（被新会话替代），请重新开始该场景")
     state = s.state if s else sandbox_service.create_initial_state(sc)
     score, status = sandbox_service.calc_final_score(sc, state)
     progress.score = score

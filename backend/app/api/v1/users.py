@@ -3,15 +3,39 @@ import csv
 import io
 import uuid
 
-from fastapi import APIRouter, Depends, Request, UploadFile
-from sqlalchemy import func, or_, select
+from fastapi import APIRouter, Depends, Query, Request, UploadFile
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_client_ip, get_current_user, get_user_agent, require_role
-from app.core.exceptions import AppError, ERR_CONFLICT, ERR_NOT_FOUND, ok_response
+from app.core.exceptions import AppError, ERR_CONFLICT, ERR_NOT_FOUND, ERR_VALIDATION, ok_response
 from app.core.security import hash_password
 from app.db.session import get_db
-from app.models import Department, OperationLog, Role, User
+from app.models import (
+    AIConversation,
+    Alert,
+    AuditReport,
+    Channel,
+    ClientErrorReport,
+    Department,
+    Device,
+    FileRecord,
+    IPAllocation,
+    LeaveRequest,
+    Message,
+    NetworkDiscovery,
+    OperationLog,
+    RefreshToken,
+    Role,
+    SandboxSession,
+    ScanAuthorization,
+    ScanReport,
+    ScoreRecord,
+    TrainingAgent,
+    TrainingProgress,
+    User,
+    UserBadge,
+)
 from app.schemas.common import Page
 from app.schemas.user import UserCreate, UserOut, UserUpdate
 from app.services.audit_log import record
@@ -24,6 +48,19 @@ _IMPORT_COLUMNS = ["username", "real_name", "email", "phone", "employee_no", "de
 
 _ADMIN_ROLE = "admin"
 _ACTIVE_STATUSES = ("active", "on_leave", "business_trip")  # 在职/休假/外勤（离职归档与禁用除外）
+
+
+async def _count_ref(session: AsyncSession, model: type, *conditions) -> int:
+    """统计某表对指定用户的外键引用行数（支持同表 or_ 组合条件）。"""
+    return (await session.execute(select(func.count()).select_from(model).where(*conditions))).scalar_one()
+
+
+async def _validate_user_refs(session: AsyncSession, role_id: int | None = None, department_id: int | None = None) -> None:
+    """外键存在性校验：role_id / department_id 引用不存在时返回 404（避免 FK IntegrityError）。"""
+    if role_id is not None and not await session.get(Role, role_id):
+        raise AppError(code=ERR_NOT_FOUND, message="角色不存在")
+    if department_id is not None and not await session.get(Department, department_id):
+        raise AppError(code=ERR_NOT_FOUND, message="部门不存在")
 
 
 async def _count_active_admins(session: AsyncSession, exclude_id: int | None = None) -> int:
@@ -86,8 +123,8 @@ async def list_users(
     keyword: str | None = None,
     department_id: int | None = None,
     status: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     current: User = Depends(require_role(["admin", "manager"])),
 ):
@@ -123,6 +160,7 @@ async def create_user(
     session: AsyncSession = Depends(get_db),
     current: User = Depends(require_role(["admin"])),
 ):
+    await _validate_user_refs(session, data.role_id, data.department_id)
     exists = (await session.execute(select(User).where(User.username == data.username))).scalar_one_or_none()
     if exists:
         raise AppError(code=ERR_CONFLICT, message="用户名已存在")
@@ -161,6 +199,7 @@ async def update_user(
     if not user:
         raise AppError(code=ERR_NOT_FOUND, message="用户不存在")
     fields = data.model_dump(exclude_unset=True)
+    await _validate_user_refs(session, fields.get("role_id"), fields.get("department_id"))
 
     # 自我保护：不能修改自己的角色，不能禁用/归档自己
     if user.id == current.id:
@@ -211,24 +250,60 @@ async def delete_user(
     if await _role_code_of(session, user.role_id) == _ADMIN_ROLE:
         if await _count_active_admins(session, exclude_id=user.id) < 1:
             raise AppError(code=ERR_CONFLICT, message="不能删除最后一名管理员")
-    # 审计表只追加不可删除（RULE 保护），有审计记录的用户物理删除会违反外键 → 归档保留审计链
-    has_logs = (
-        await session.execute(
-            select(func.count()).select_from(OperationLog).where(OperationLog.user_id == user_id)
+    # 引用计数（对齐 departments.py 的 409+明细模式）：用户被业务数据引用时禁止物理删除，
+    # 提示先解除引用；审计表只追加不可删除（RULE 保护），有审计记录的用户走归档保留审计链。
+    uid = user_id
+    refs = {
+        "devices": await _count_ref(session, Device, Device.owner_id == uid),
+        "ip_allocations": await _count_ref(session, IPAllocation, IPAllocation.allocated_to == uid),
+        "alerts": await _count_ref(session, Alert, Alert.acknowledged_by == uid),
+        "scan_reports": await _count_ref(session, ScanReport, or_(ScanReport.generated_by == uid, ScanReport.approved_by == uid)),
+        "discoveries": await _count_ref(session, NetworkDiscovery, NetworkDiscovery.created_by == uid),
+        "channels": await _count_ref(session, Channel, Channel.creator_id == uid),
+        "messages": await _count_ref(session, Message, Message.sender_id == uid),
+        "ai_conversations": await _count_ref(session, AIConversation, AIConversation.user_id == uid),
+        "files": await _count_ref(session, FileRecord, FileRecord.user_id == uid),
+        "leave_requests": await _count_ref(session, LeaveRequest, or_(LeaveRequest.user_id == uid, LeaveRequest.approver_id == uid)),
+        "training": (
+            await _count_ref(session, TrainingProgress, TrainingProgress.user_id == uid)
+            + await _count_ref(session, SandboxSession, SandboxSession.user_id == uid)
+            + await _count_ref(session, ScoreRecord, ScoreRecord.user_id == uid)
+        ),
+        "badges": await _count_ref(session, UserBadge, UserBadge.user_id == uid),
+        "error_reports": await _count_ref(session, ClientErrorReport, ClientErrorReport.user_id == uid),
+        "scan_authorizations": await _count_ref(session, ScanAuthorization, ScanAuthorization.approved_by == uid),
+        "training_agents": await _count_ref(session, TrainingAgent, TrainingAgent.created_by == uid),
+        "audit_reports": await _count_ref(session, AuditReport, AuditReport.generated_by == uid),
+    }
+    has_logs = (await session.execute(select(func.count()).select_from(OperationLog).where(OperationLog.user_id == uid))).scalar_one() > 0
+    if not has_logs and sum(refs.values()) > 0:
+        _REF_LABELS = {
+            "devices": "设备", "ip_allocations": "IP 分配", "alerts": "告警", "scan_reports": "扫描报告",
+            "discoveries": "网络发现", "channels": "频道", "messages": "消息", "ai_conversations": "AI 会话",
+            "files": "上传文件", "leave_requests": "休假申请", "training": "训练记录", "badges": "徽章",
+            "error_reports": "错误上报", "scan_authorizations": "扫描授权",
+            "training_agents": "训练代理", "audit_reports": "审计报告",
+        }
+        detail = "、".join(f"{_REF_LABELS[k]} {v} 条" for k, v in refs.items() if v)
+        raise AppError(
+            code=ERR_CONFLICT,
+            message=f"该用户存在业务引用（{detail}），请先解除引用后再删除",
+            data=refs,
         )
-    ).scalar_one() > 0
     action = "archived" if has_logs else "deleted"
     if has_logs:
         user.status = "archived"
         user.password_hash = hash_password(f"__archived_{user.id}_{uuid.uuid4().hex}")  # 口令立即失效
     await record(
         session, current, "user:delete", target_type="user", target_id=str(user_id),
-        detail={"username": user.username, "action": action},
+        detail={"username": user.username, "action": action, "refs": refs},
         ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
     )
     if has_logs:
         await session.commit()
         return ok_response(data={"action": action})
+    # refresh token 是纯会话记录（非业务数据）：物理删除用户前先清除，等效注销其全部会话
+    await session.execute(delete(RefreshToken).where(RefreshToken.user_id == user_id))
     await session.delete(user)
     await session.commit()
     return ok_response(data={"action": action})
@@ -245,17 +320,23 @@ async def import_users(
     filename = file.filename or ""
     rows: list[dict] = []
     if filename.endswith(".xlsx"):
-        from openpyxl import load_workbook
+        try:
+            from openpyxl import load_workbook
 
-        wb = load_workbook(io.BytesIO(raw), read_only=True)
-        ws = wb.active
-        header = [c.value for c in next(ws.iter_rows())]
-        for row in ws.iter_rows(min_row=2):
-            rows.append({header[i]: (row[i].value if i < len(row) else None) for i in range(len(header))})
+            wb = load_workbook(io.BytesIO(raw), read_only=True)
+            ws = wb.active
+            header = [c.value for c in next(ws.iter_rows())]
+            for row in ws.iter_rows(min_row=2):
+                rows.append({header[i]: (row[i].value if i < len(row) else None) for i in range(len(header))})
+        except Exception:
+            raise AppError(code=ERR_VALIDATION, message="Excel 文件解析失败，请确认是有效的 .xlsx 文件")
     else:
-        text = raw.decode("utf-8-sig")
-        reader = csv.DictReader(io.StringIO(text))
-        rows = list(reader)
+        try:
+            text = raw.decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(text))
+            rows = list(reader)
+        except Exception:
+            raise AppError(code=ERR_VALIDATION, message="CSV 文件解析失败，请使用 UTF-8 编码")
 
     roles = {r.code: r for r in (await session.execute(select(Role))).scalars()}
     depts = {d.name: d for d in (await session.execute(select(Department))).scalars()}
@@ -268,6 +349,10 @@ async def import_users(
             continue
         if (await session.execute(select(User).where(User.username == username))).scalar_one_or_none():
             errors.append({"row": idx, "error": f"用户名 {username} 已存在"})
+            continue
+        employee_no = (row.get("employee_no") or "").strip()
+        if employee_no and (await session.execute(select(User).where(User.employee_no == employee_no))).scalar_one_or_none():
+            errors.append({"row": idx, "error": f"工号 {employee_no} 已存在"})
             continue
         role = roles.get((row.get("role") or "").strip())
         dept = depts.get((row.get("department") or "").strip())
@@ -301,6 +386,7 @@ async def export_users(
     await session.commit()
 
     buf = io.StringIO()
+    buf.write("﻿")  # UTF-8 BOM，Excel 直接打开中文不乱码（与导入 utf-8-sig 对齐）
     writer = csv.DictWriter(buf, fieldnames=_IMPORT_COLUMNS + ["password"])
     writer.writeheader()
     for u in users:

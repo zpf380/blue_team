@@ -43,6 +43,7 @@
 import { computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import MarkdownText from './MarkdownText.vue'
+import { formatDateTime } from '@/utils/format'
 
 const props = defineProps({
   msg: { type: Object, required: true },
@@ -69,7 +70,7 @@ const providerTag = computed(() => {
 })
 
 const timeText = computed(() =>
-  props.msg.created_at ? new Date(props.msg.created_at).toLocaleString('zh-CN', { hour12: false }) : ''
+  formatDateTime(props.msg.created_at)
 )
 
 const opsVisible = computed(() => props.msg.sender_type !== 'system' && !props.msg.is_deleted)

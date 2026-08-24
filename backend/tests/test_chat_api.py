@@ -56,7 +56,7 @@ async def _login(client, username, password="Bt@123456"):
 
 
 async def _user_id(client, admin_t, username):
-    users = (await client.get("/api/v1/users", headers=_h(admin_t), params={"size": 200})).json()["data"]["items"]
+    users = (await client.get("/api/v1/users", headers=_h(admin_t), params={"size": 100})).json()["data"]["items"]
     return next(u for u in users if u["username"] == username)["id"]
 
 

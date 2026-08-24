@@ -40,8 +40,12 @@
 
     <el-card class="card" header="登录会话（可在其他设备主动下线）">
       <el-table :data="sessions" size="small" v-loading="sessionLoading">
-        <el-table-column prop="created_at" label="登录时间" width="180" />
-        <el-table-column prop="expires_at" label="过期时间" width="180" />
+        <el-table-column label="登录时间" width="180">
+          <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="过期时间" width="180">
+          <template #default="{ row }">{{ formatDateTime(row.expires_at) }}</template>
+        </el-table-column>
         <el-table-column prop="ip_address" label="来源 IP" width="140" />
         <el-table-column prop="user_agent" label="设备" show-overflow-tooltip />
         <el-table-column label="操作" width="100">
@@ -67,10 +71,11 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/api/auth'
+import { formatDateTime } from '@/utils/format'
 
 const userStore = useUserStore()
 
@@ -143,9 +148,18 @@ async function confirmDisable() {
 }
 
 async function revoke(row) {
-  await authApi.revokeSession(row.id)
-  ElMessage.success('该会话已下线')
-  loadSessions()
+  try {
+    await ElMessageBox.confirm('确定将该会话强制下线？对应设备将需要重新登录。', '下线会话', { type: 'warning' })
+  } catch {
+    return // 用户取消
+  }
+  try {
+    await authApi.revokeSession(row.id)
+    ElMessage.success('该会话已下线')
+    loadSessions()
+  } catch (e) {
+    ElMessage.error(e?.message || '下线失败')
+  }
 }
 
 onMounted(() => {

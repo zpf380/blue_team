@@ -34,6 +34,16 @@ async def _scenario_or_404(session: AsyncSession, scenario_id: int) -> TrainingS
     return sc
 
 
+async def _course_of_scenario(session: AsyncSession, sc: TrainingScenario) -> TrainingAgent | None:
+    return await session.get(TrainingAgent, sc.agent_id) if sc.agent_id else None
+
+
+def _guard_draft(agent: TrainingAgent, action: str) -> None:
+    """发布态守卫：已发布课程不允许结构性修改/删除（需先下线，避免影响进行中的学员）。"""
+    if agent.status == "published":
+        raise AppError(code=ERR_CONFLICT, message=f"课程已发布，请先下线再{action}")
+
+
 def _validate_content_check(content: dict | None, where: str) -> None:
     """编辑器写入时校验任务 check.cmd 必须在沙箱白名单内。"""
     if not content:
@@ -216,6 +226,7 @@ async def update_course(
     user: User = Depends(require_permission("training:course:manage")),
 ):
     agent = await _agent_or_404(session, course_id)
+    _guard_draft(agent, "修改课程")
     if data.name is not None:
         agent.name = data.name
     if data.description is not None:
@@ -242,6 +253,7 @@ async def delete_course(
     user: User = Depends(require_permission("training:course:manage")),
 ):
     agent = await _agent_or_404(session, course_id)
+    _guard_draft(agent, "删除课程")
     scenario_ids = list((await session.execute(
         select(TrainingScenario.id).where(TrainingScenario.agent_id == course_id)
     )).scalars())
@@ -275,6 +287,8 @@ async def publish_course(
     user: User = Depends(require_permission("training:course:manage")),
 ):
     agent = await _agent_or_404(session, course_id)
+    if agent.status == "published":
+        raise AppError(code=ERR_CONFLICT, message="课程已发布，请勿重复发布")
     scenario_count = (await session.execute(
         select(func.count()).select_from(TrainingScenario).where(TrainingScenario.agent_id == course_id)
     )).scalar_one()
@@ -300,6 +314,8 @@ async def unpublish_course(
     user: User = Depends(require_permission("training:course:manage")),
 ):
     agent = await _agent_or_404(session, course_id)
+    if agent.status != "published":
+        raise AppError(code=ERR_CONFLICT, message="课程未发布，无需下线")
     agent.status = "draft"
     agent.published_at = None
     await record(
@@ -319,7 +335,8 @@ async def add_scenario(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("training:course:manage")),
 ):
-    await _agent_or_404(session, course_id)
+    agent = await _agent_or_404(session, course_id)
+    _guard_draft(agent, "添加场景")
     _validate_content_check(data.content, "场景「%s」" % data.title)
     sc = TrainingScenario(
         code=None,
@@ -352,6 +369,9 @@ async def update_scenario(
     user: User = Depends(require_permission("training:course:manage")),
 ):
     sc = await _scenario_or_404(session, scenario_id)
+    agent = await _course_of_scenario(session, sc)
+    if agent:
+        _guard_draft(agent, "修改场景")
     if data.title is not None:
         sc.title = data.title
     if data.description is not None:
@@ -385,6 +405,9 @@ async def delete_scenario(
     user: User = Depends(require_permission("training:course:manage")),
 ):
     sc = await _scenario_or_404(session, scenario_id)
+    agent = await _course_of_scenario(session, sc)
+    if agent:
+        _guard_draft(agent, "删除场景")
     progress = (await session.execute(
         select(TrainingProgress.id).where(TrainingProgress.scenario_id == scenario_id).limit(1)
     )).scalar_one_or_none()

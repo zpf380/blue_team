@@ -4,6 +4,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DataError, IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # 业务错误码
@@ -49,6 +50,17 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _validation_error(_req: Request, exc: RequestValidationError):
         return JSONResponse(status_code=422, content=ok_response(
             code=ERR_VALIDATION, message="参数校验失败", data=exc.errors()))
+
+    # 兜底：未显式校验/捕获的外键冲突（物理删除被引用行）、字段类型/长度超限 → 不再裸 500
+    @app.exception_handler(IntegrityError)
+    async def _integrity_error(_req: Request, exc: IntegrityError):
+        return JSONResponse(status_code=200, content=ok_response(
+            code=ERR_CONFLICT, message="数据存在引用或唯一性冲突，无法完成操作"))
+
+    @app.exception_handler(DataError)
+    async def _data_error(_req: Request, exc: DataError):
+        return JSONResponse(status_code=200, content=ok_response(
+            code=ERR_VALIDATION, message="数据格式或长度不符合要求"))
 
 
 def ok_response(code: int = OK, message: str = "ok", data: Any = None) -> dict:

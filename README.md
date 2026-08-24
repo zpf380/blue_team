@@ -10,7 +10,7 @@
 |---|---|
 | 前端 | Vue3 + Vite + Element Plus + Pinia + ECharts |
 | 后端 | Python 3.13 / FastAPI / SQLAlchemy 2.0 (async) / Pydantic v2 |
-| 数据 | PostgreSQL 16 / Redis 7 / MinIO（InfluxDB 代码未使用，未纳入生产栈） |
+| 数据 | PostgreSQL 16 / Redis 7 / MinIO |
 | AI | DeepSeek API（可降级 Ollama，永不抛错） |
 | 部署 | Docker Compose + Nginx 反向代理（限流/安全头加固） |
 
@@ -32,7 +32,7 @@ blue-team-system/
 │   │   │               # sandbox_service / badge_service / training_generator / leave_status
 │   │   └── ws/         # WebSocket 频道聊天 + 全局通知（心跳 / 广播）
 │   ├── scripts/        # init_db / seed_data / demo_data / create_admin / reset_data
-│   └── tests/          # 单元 + 集成测试（179 个全绿，需 PostgreSQL）
+│   └── tests/          # 单元 + 集成测试（180 个全绿，需 PostgreSQL）
 ├── frontend/           # Vue3 前端
 │   ├── Dockerfile + nginx.conf      # 生产镜像（静态托管 + 反代 /api /ws + 限流加固）
 │   └── src/
@@ -42,7 +42,7 @@ blue-team-system/
 │       ├── directives/ # v-permission 按钮级权限
 │       └── views/      # 登录 / 五角色首页 / 聊天 / 训练 / 监控 / 审计 / 考勤
 └── deploy/
-    ├── docker-compose.dev.yml   # 开发基础设施（PG/Redis/InfluxDB/MinIO）
+    ├── docker-compose.dev.yml   # 开发基础设施（PG/Redis/MinIO）
     ├── docker-compose.prod.yml  # 单机生产栈（PG/Redis/MinIO/backend/frontend）
     ├── ollama.yml               # 可选：本地 Ollama（AI 降级通道）
     ├── .env.prod.example        # 生产环境变量模板
@@ -57,7 +57,7 @@ blue-team-system/
 前置：Docker Desktop（需已启动）、Python 3.11+、Node.js。
 
 ```bash
-# 1. 启动基础设施（PostgreSQL/Redis/InfluxDB/MinIO）
+# 1. 启动基础设施（PostgreSQL/Redis/MinIO）
 cd H:\ZPF12\Projects\blue-team-system
 docker compose -f deploy/docker-compose.dev.yml up -d
 
@@ -80,14 +80,6 @@ npm run dev        # http://localhost:5173
 
 > **生产部署注意**：首次 `bash deploy/deploy.sh up` 预置数据后，生产环境默认口令已被改密（见下文「安全加固」），下表口令**仅本地开发环境有效**。
 
-| 账号 | 密码 | 角色 |
-|---|---|---|
-| admin | admin123 | 系统管理员 |
-| manager01 | Bt@123456 | 安全主管 |
-| analyst01 | Bt@123456 | 安全分析师 |
-| trainee01 | Bt@123456 | 训练学员 |
-| trainee02 | Bt@123456 | 训练学员 |
-| auditor01 | Bt@123456 | 审计员 |
 
 
 账号	角色	新口令
@@ -122,10 +114,10 @@ auditor01	审计员	U$Y$j2f_g2fD&?%O
 | AI 助手会话 | AI 问答**会话持久化**：历史会话列表 / 切换 / 删除，切回页面自动续接上次对话（后端 `ai_conversations` 持久化，最近 10 轮上下文） |
 
 - 认证：登录/刷新/登出、bcrypt、JWT（2h+7d）、连续 5 次失败锁定 15 分钟、MFA（强制角色绑定 TOTP）
-- RBAC：角色白名单 + 权限点校验 + 数据范围过滤（all / sub_dept / dept / self）+ 按钮级 v-permission
+- RBAC：角色白名单 + 权限点校验 + 数据范围过滤（all / dept / self 启用，**sub_dept 预留未启用**）+ 按钮级 v-permission
 - 5 角色工作台：系统管理员 / 安全主管 / 安全分析师 / 训练学员 / 审计员
 - 前端：动态菜单 / 路由守卫 / 401 自动刷新 / WebSocket 实时推送
-- **后端测试 179/179 全绿**
+- **后端测试 180/180 全绿**
 
 ## 生产部署（单机 4C8G，Docker Compose）
 
@@ -172,6 +164,18 @@ bash deploy/tunnel.sh status   # 查看当前公网地址（隧道重启后地�
 bash deploy/tunnel.sh down     # 停止隧道（关闭公网入口）
 ```
 
+### 漏洞扫描机制
+
+扫描编排：`launch_scan` → 后台任务 `execute_scan`（pending→running→completed/failed）→ 真实 `nmap` 子进程（唯一进程边界）→ XML 解析 → 风险评分 → 告警去重 + 外部通知。
+
+| 能力 | 说明 |
+|---|---|
+| **扫描选项** | 支持 `scan_type`（`sS` 默认 / `sT` / `sU`）、`top_ports` 端口数、`port_range` 端口范围（如 `22,80,443`、`1-1000`，与端口数二选一，展开上限 `NMAP_MAX_PORTS_IN_RANGE=1024` 防全端口 DoS）、NSE 开关；本次扫描的生效选项快照落 `scan_reports.scan_options`（JSONB） |
+| **UDP 扫描** | `sU` 自动使用更小默认端口数（`NMAP_UDP_TOP_PORTS=20`）与更保守超时（`NMAP_UDP_TIMEOUT_SECONDS=300`），避免 UDP 慢速拖垮队列 |
+| **真实漏洞检测（NSE）** | 默认挂 `--script vuln`（nmap 自带离线签名，不依赖外网）：解析端口级与主机级 `<script>` 结果，提取 `CVE-XXXX-XXXX`，启发式定级（`ms17-010`/`smb-vuln-*`→critical、含 CVE→high、其余 medium）。与静态端口映射合并，漏洞列表带 `source`（`nse`/`static`）标签区分；`NMAP_NSE_SCRIPTS=""` 可全局关闭，扫描接口的 `nse` 字段可单次关闭 |
+| **任务工程化** | 运行中可**取消**（`POST .../cancel`，kill 子进程后落 `failed/cancelled`）；失败可**重试**（`POST .../retry`，沿用原 scan_options 重新排队）；失败原因分类 `error_code ∈ {cancelled, timeout, permission, unreachable, generic}`（权限不足/目标不可达等按 nmap stderr 关键字识别），前端列表与详情可操作 |
+| **基线漂移对比** | 同目标同扫描口径（scan_type + 端口规格一致）的两次扫描自动对比，产出 `baseline_diff`：`new_ports`（新增）/`closed_ports`（关闭）/`changed_services`（服务变化），写入本次 `scan_data` 并在摘要提示「与上次扫描相比」；仅提示，**不改变告警阈值** |
+
 ### 告警外部通知
 
 扫描 risk≥70 自动建告警 → 后台推送外部渠道，**任一渠道失败静默不影响主流程**，发送成功回写 `alerts.notified_at`（监控中心可看「已通知」）。未配置渠道自动关闭。
@@ -207,13 +211,13 @@ bash deploy/tunnel.sh down     # 停止隧道（关闭公网入口）
 - **降级**：密钥留空 / DeepSeek 超时限流 → 自动降级 Ollama → 最终返回占位文案，永不抛错（NFR-004）。
 - **本地开发**：密钥写在 `backend/.env` 同名变量即可，无需动生产配置。
 
-> 架构说明：生产栈含 PostgreSQL / Redis / MinIO / backend / frontend(Nginx:443)。InfluxDB 代码未使用故不纳入；Ollama（约需 4-8GB 模型）独立于 `ollama.yml` 按需启用。
+> 架构说明：生产栈含 PostgreSQL / Redis / MinIO / backend / frontend(Nginx:443)。Ollama（约需 4-8GB 模型）独立于 `ollama.yml` 按需启用。
 
 ## 测试
 
 ```bash
 cd backend
-.venv\Scripts\python -m pytest        # 179/179 全绿
+.venv\Scripts\python -m pytest        # 180/180 全绿
 # 集成测试需 PostgreSQL 已启动（docker compose up 后自动运行）
 ```
 

@@ -76,7 +76,7 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, onBeforeUnmount, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { trainingApi } from '@/api/training'
@@ -184,7 +184,6 @@ async function doSubmit() {
 }
 
 onMounted(loadSessions)
-onBeforeUnmount(() => {})
 </script>
 
 <style scoped>

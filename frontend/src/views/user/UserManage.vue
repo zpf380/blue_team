@@ -28,7 +28,8 @@
       <el-button @click="exportCsv">导出 CSV</el-button>
     </div>
 
-    <el-table :data="rows" v-loading="loading" border stripe>
+    <el-empty v-if="!rows.length && !loading" description="暂无用户" />
+    <el-table v-else :data="rows" v-loading="loading" border stripe>
       <el-table-column prop="username" label="用户名" min-width="110" />
       <el-table-column prop="real_name" label="姓名" min-width="90" />
       <el-table-column prop="employee_no" label="工号" width="90" />
@@ -45,7 +46,7 @@
         </template>
       </el-table-column>
       <el-table-column prop="last_login_at" label="最近登录" width="170">
-        <template #default="{ row }">{{ row.last_login_at ? new Date(row.last_login_at).toLocaleString() : '—' }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.last_login_at) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="150" fixed="right">
         <template #default="{ row }">
@@ -71,14 +72,14 @@
     </div>
 
     <el-dialog v-model="dialogVisible" :title="form.id ? '编辑用户' : '新增用户'" width="520px">
-      <el-form :model="form" label-width="80px">
-        <el-form-item label="用户名"><el-input v-model="form.username" :disabled="!!form.id" /></el-form-item>
-        <el-form-item label="密码">
+      <el-form ref="formRef" :model="form" :rules="rules" label-width="80px">
+        <el-form-item label="用户名" prop="username"><el-input v-model="form.username" :disabled="!!form.id" /></el-form-item>
+        <el-form-item label="密码" prop="password">
           <el-input v-model="form.password" type="password" show-password :placeholder="form.id ? '留空则不修改' : '至少 6 位'" />
         </el-form-item>
-        <el-form-item label="姓名"><el-input v-model="form.real_name" /></el-form-item>
+        <el-form-item label="姓名" prop="real_name"><el-input v-model="form.real_name" /></el-form-item>
         <el-form-item label="工号"><el-input v-model="form.employee_no" /></el-form-item>
-        <el-form-item label="角色">
+        <el-form-item label="角色" prop="role_id">
           <el-select v-model="form.role_id" style="width: 100%">
             <el-option v-for="r in roles" :key="r.id" :label="r.name" :value="r.id" />
           </el-select>
@@ -87,7 +88,7 @@
           <el-tree-select v-model="form.department_id" :data="deptTree" :props="{ value: 'id', label: 'name', children: 'children' }" check-strictly clearable style="width: 100%" />
         </el-form-item>
         <el-form-item label="职位"><el-input v-model="form.position" /></el-form-item>
-        <el-form-item label="邮箱"><el-input v-model="form.email" /></el-form-item>
+        <el-form-item label="邮箱" prop="email"><el-input v-model="form.email" /></el-form-item>
         <el-form-item label="手机号"><el-input v-model="form.phone" /></el-form-item>
       </el-form>
       <template #footer>
@@ -103,6 +104,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { userApi } from '@/api/users'
 import { downloadWithAuth } from '@/utils/download'
+import { formatDateTime } from '@/utils/format'
 
 const rows = ref([])
 const total = ref(0)
@@ -111,11 +113,24 @@ const query = reactive({ keyword: '', department_id: null, status: '', page: 1, 
 
 const dialogVisible = ref(false)
 const saving = ref(false)
+const formRef = ref(null)
 const deptTree = ref([])
 const roles = ref([])
 
 const emptyForm = () => ({ id: null, username: '', password: '', real_name: '', employee_no: '', role_id: null, department_id: null, position: '', email: '', phone: '' })
 const form = reactive(emptyForm())
+
+// 函数形式：编辑时（form.id 非空）密码可留空不修改
+const rules = () => ({
+  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+  real_name: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
+  role_id: [{ required: true, message: '请选择角色', trigger: 'change' }],
+  password: [
+    ...(!form.id ? [{ required: true, message: '请输入密码', trigger: 'blur' }] : []),
+    { min: 6, max: 64, message: '密码长度 6-64 位', trigger: 'blur' }
+  ],
+  email: [{ type: 'email', message: '邮箱格式不正确', trigger: 'blur' }]
+})
 
 async function load() {
   loading.value = true
@@ -134,8 +149,10 @@ function openDialog(row) {
 }
 
 async function save() {
-  if (!form.id && !form.password) {
-    ElMessage.warning('请填写密码（至少 6 位）')
+  if (!formRef.value) return
+  try {
+    await formRef.value.validate()
+  } catch {
     return
   }
   saving.value = true

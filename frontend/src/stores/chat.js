@@ -60,6 +60,21 @@ export const useChatStore = defineStore('chat', () => {
         type: 'warning',
         duration: 5000
       })
+    } else if (payload.type === 'system') {
+      // 系统消息（入频道/离开频道等）：WS 按频道连接，收到的即当前频道，直接插入列表
+      if (currentChannel.value) {
+        messages.value.push({
+          id: `sys-${Date.now()}`,
+          channel_id: currentChannel.value.id,
+          sender_id: null,
+          sender_name: '系统',
+          sender_type: 'system',
+          message_type: 'text',
+          content: payload.data?.text || '',
+          is_deleted: false,
+          created_at: new Date().toISOString()
+        })
+      }
     }
   }
 

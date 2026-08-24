@@ -25,7 +25,8 @@
         <h3>课程管理</h3>
         <el-button type="primary" plain @click="createEmpty">新建课程</el-button>
       </div>
-      <el-table :data="courses" stripe>
+      <el-empty v-if="!courses.length && !loading" description="暂无课程，可点击「新建课程」或输入主题用 AI 生成" />
+      <el-table v-else :data="courses" stripe>
         <el-table-column prop="name" label="课程名称" min-width="200" />
         <el-table-column label="难度" width="80">
           <template #default="{ row }">{{ diffText(row.difficulty) }}</template>
@@ -58,7 +59,7 @@
     </el-card>
 
     <!-- 课程编辑器 -->
-    <el-dialog v-model="dialogVisible" title="课程编辑器" width="960px" top="5vh" destroy-on-close>
+    <el-dialog v-model="dialogVisible" title="课程编辑器" width="960px" class="course-dialog" top="5vh" destroy-on-close :before-close="beforeCloseEditor">
       <div v-loading="detailLoading">
         <el-form label-width="80px" class="course-form">
           <el-form-item label="课程名称" required>
@@ -164,7 +165,7 @@
       </div>
 
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button @click="cancelEditor">取消</el-button>
         <el-button type="primary" :loading="saving" @click="saveCourse">保存课程</el-button>
         <el-button type="success" :loading="saving" @click="publishFromEditor">发布课程</el-button>
       </template>
@@ -197,11 +198,23 @@ function nextKey() {
   return `sc_${keySeq}`
 }
 
-function fmt(v) {
-  return v ? dayjs(v).format('YYYY-MM-DD HH:mm') : ''
-}
+import { formatDateTime as fmt } from '@/utils/format'
 function diffText(d) {
   return { 1: '入门', 2: '进阶', 3: '挑战' }[d] || '入门'
+}
+
+// 关闭编辑器前若有未保存场景修改，先确认（覆盖取消按钮 / X / 遮罩 / ESC）
+async function beforeCloseEditor(done) {
+  const dirty = form.scenarios.some((sc) => sc._dirty)
+  if (!dirty) return done()
+  try {
+    await ElMessageBox.confirm('有场景修改未保存，确定放弃并关闭？', '关闭编辑器', { type: 'warning' })
+    done()
+  } catch { /* 用户取消关闭 */ }
+}
+
+async function cancelEditor() {
+  await beforeCloseEditor(() => { dialogVisible.value = false })
 }
 
 async function load() {
@@ -461,6 +474,7 @@ onMounted(load)
 </script>
 
 <style scoped>
+.course-dialog { max-width: 92vw; }
 .gen-card { margin-bottom: 14px; }
 .gen-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .gen-label { font-weight: 600; }

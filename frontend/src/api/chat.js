@@ -18,5 +18,5 @@ export const chatApi = {
   sendContactRequest: (target_id) => http.post('/chat/contacts/requests', { target_id }),
   acceptContactRequest: (id) => http.post(`/chat/contacts/requests/${id}/accept`),
   rejectContactRequest: (id) => http.post(`/chat/contacts/requests/${id}/reject`),
-  removeContact: (contact_id) => http.delete(`/chat/contacts/${contact_id}`)
+  removeContact: (id) => http.delete(`/chat/contacts/${id}`)
 }

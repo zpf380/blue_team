@@ -4,12 +4,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.channels import _get_channel, create_message
-from app.core.dependencies import require_permission
+from app.core.dependencies import get_client_ip, get_user_agent, require_permission
 from app.core.exceptions import AppError, ERR_FORBIDDEN, ERR_NOT_FOUND, ok_response
 from app.db.session import get_db
 from app.models import AIConversation, User
 from app.schemas.chat import AIChatIn, AIConversationDetail, AIConversationOut, MessageCreate
 from app.services.ai_gateway import gateway, trim_history
+from app.services.audit_log import record
 
 router = APIRouter(tags=["AI 助手"])
 
@@ -118,11 +119,18 @@ async def get_ai_conversation(
 @router.delete("/ai/conversations/{conversation_id}")
 async def delete_ai_conversation(
     conversation_id: int,
+    request: Request,
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("chat:ai")),
 ):
     """删除我的某个会话。"""
     conv = await _get_own_conversation(session, conversation_id, user)
+    title = _conv_title(conv)
     await session.delete(conv)
+    await record(
+        session, user, "chat:ai:conversation:delete", target_type="ai_conversation",
+        target_id=str(conversation_id), detail={"title": title},
+        ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
+    )
     await session.commit()
     return ok_response(data={"deleted": conversation_id})

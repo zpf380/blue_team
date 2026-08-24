@@ -6,6 +6,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AppError, ERR_VALIDATION
 from app.models import Department, Device, Role, User
 
 
@@ -43,15 +44,9 @@ def apply_data_scope(query, user: User, model) -> object:
         return query
     if scope == "sub_dept":
         if hasattr(model, "department_id"):
-            # 传入 session 做递归时由调用方先算好 ids
-            raise ValueError("sub_dept 需调用 apply_data_scope_sub_dept")
+            # sub_dept 档位未启用（无角色使用），业务报错而非裸 500
+            raise AppError(code=ERR_VALIDATION, message="sub_dept 数据范围未启用（预留功能，请联系管理员配置）")
         return query
-    return query
-
-
-def apply_data_scope_sub_dept(query, user: User, model, sub_dept_ids: list[int]):
-    if hasattr(model, "department_id"):
-        return query.where(model.department_id.in_(sub_dept_ids))
     return query
 
 
@@ -62,7 +57,7 @@ def apply_device_data_scope(query, user: User, model) -> object:
     - all / admin：不变
     - dept：Device.department_id == user.department_id（外连自然排除无设备关联的全局记录）
     - self：Device.owner_id == user.id
-    - sub_dept：需先算好 ids 调用 apply_device_data_scope_sub_dept
+    - sub_dept：未启用（无角色使用，命中 raise）
     """
     role: Role | None = getattr(user, "_role", None)
     scope = role.data_scope if role else "self"
@@ -74,11 +69,7 @@ def apply_device_data_scope(query, user: User, model) -> object:
     if scope == "self":
         return query.where(Device.owner_id == user.id)
     if scope == "sub_dept":
-        raise ValueError("sub_dept 需调用 apply_device_data_scope_sub_dept")
+        raise AppError(code=ERR_VALIDATION, message="sub_dept 数据范围未启用（预留功能，请联系管理员配置）")
     if scope == "dept":
         return query.where(Device.department_id == user.department_id)
     return query
-
-
-def apply_device_data_scope_sub_dept(query, user: User, model, sub_dept_ids: list[int]):
-    return query.outerjoin(Device, Device.id == model.device_id).where(Device.department_id.in_(sub_dept_ids))

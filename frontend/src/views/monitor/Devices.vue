@@ -35,7 +35,8 @@
         <el-button type="primary" plain @click="load">查询</el-button>
       </div>
 
-      <el-table :data="items" stripe>
+      <el-empty v-if="!items.length && !loading" description="暂无设备" />
+      <el-table v-else :data="items" stripe>
         <el-table-column prop="name" label="设备名称" min-width="120" fixed="left">
           <template #default="{ row }">
             <span :class="['dot', row.status]"></span>{{ row.name }}
@@ -149,12 +150,12 @@
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { monitorApi } from '@/api/monitor'
-import http from '@/api/http'
+import { departmentApi } from '@/api/departments'
 
 const deviceTypes = ['server', 'switch', 'firewall', 'router', 'edr', 'workstation', 'database', 'other']
 const statusText = (s) => ({ active: '在线', offline: '离线', maintenance: '维护', archived: '已归档' }[s] || s)
 const statusTag = (s) => ({ active: 'success', offline: 'info', maintenance: 'warning', archived: 'danger' }[s] || 'info')
-const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN') : '—')
+import { formatDateTime as fmt } from '@/utils/format'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -204,7 +205,7 @@ function stopAutoRefresh() {
 
 async function loadDepts() {
   try {
-    const roots = await http.get('/departments/tree')
+    const roots = await departmentApi.tree()
     const flat = []
     const walk = (nodes, depth = 0) => {
       nodes.forEach((n) => {

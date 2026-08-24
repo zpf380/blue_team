@@ -5,6 +5,9 @@
         <el-input v-model="keyword" placeholder="搜索聊天消息（支持中文）" clearable style="width: 240px" @keyup.enter="doSearch" />
         <el-button type="primary" @click="doSearch">搜索</el-button>
         <div style="flex: 1"></div>
+        <el-badge v-if="chat.mentionCount" :value="chat.mentionCount" :max="99" class="mention-badge">
+          <el-button type="warning" plain @click="chat.mentionCount = 0">@ 提及</el-button>
+        </el-badge>
         <el-button type="warning" plain @click="openJoin">加入群组</el-button>
         <el-button v-permission="'chat:channel'" type="success" @click="openCreate">创建频道</el-button>
       </div>
@@ -48,8 +51,8 @@
 
     <!-- 创建频道 -->
     <el-dialog v-model="createVisible" title="创建频道" width="480px">
-      <el-form label-width="80px">
-        <el-form-item label="频道名称"><el-input v-model="form.name" maxlength="100" placeholder="如：应急响应演练" /></el-form-item>
+      <el-form ref="createFormRef" :rules="createRules" label-width="80px">
+        <el-form-item label="频道名称" prop="name"><el-input v-model="form.name" maxlength="100" placeholder="如：应急响应演练" /></el-form-item>
         <el-form-item label="类型">
           <el-radio-group v-model="form.type">
             <el-radio value="public">公开频道</el-radio>
@@ -86,6 +89,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '@/api/chat'
 import { useChatStore } from '@/stores/chat'
+import { formatDateTime } from '@/utils/format'
 import { useUserStore } from '@/stores/user'
 
 const router = useRouter()
@@ -101,6 +105,8 @@ const keyword = ref('')
 
 const createVisible = ref(false)
 const saving = ref(false)
+const createFormRef = ref()
+const createRules = { name: [{ required: true, message: '请输入频道名称', trigger: 'blur' }] }
 const form = reactive({ name: '', type: 'public', description: '' })
 
 const joinVisible = ref(false)
@@ -117,7 +123,7 @@ function typeTag(t) {
   return { public: 'success', private: 'warning', trainee: 'info' }[t] || 'info'
 }
 function formatTime(s) {
-  return s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : ''
+  return formatDateTime(s)
 }
 
 async function load() {
@@ -141,8 +147,10 @@ function openCreate() {
 }
 
 async function create() {
-  if (!form.name.trim()) {
-    ElMessage.warning('请输入频道名称')
+  if (!createFormRef.value) return
+  try {
+    await createFormRef.value.validate()
+  } catch {
     return
   }
   saving.value = true
@@ -201,6 +209,7 @@ onMounted(load)
 
 <style scoped>
 .toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
+.mention-badge { margin-right: 4px; }
 .ch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .ch-card {
   border: 1px solid #ebeef5; border-radius: 8px; padding: 14px 16px; cursor: pointer;

@@ -32,11 +32,9 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { trainingApi } from '@/api/training'
-import { useUserStore } from '@/stores/user'
 
 const rows = ref([])
 const loading = ref(false)
-const userStore = useUserStore()
 
 function medal(r) {
   if (r === 1) return 'gold'

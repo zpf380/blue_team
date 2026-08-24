@@ -52,7 +52,7 @@
             <el-table-column prop="target_id" label="对象ID" width="70" />
             <el-table-column prop="ip_address" label="IP" width="120" />
             <el-table-column label="时间" min-width="150">
-              <template #default="{ row }">{{ row.created_at ? new Date(row.created_at).toLocaleString('zh-CN') : '—' }}</template>
+              <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
             </el-table-column>
           </el-table>
           <el-empty v-if="!sensitiveRows.length" :image-size="60" description="统计周期内无敏感操作" />
@@ -80,7 +80,7 @@
         </el-table-column>
         <el-table-column prop="generated_by_name" label="生成人" width="100" />
         <el-table-column label="时间" width="170">
-          <template #default="{ row }">{{ row.created_at ? new Date(row.created_at).toLocaleString('zh-CN') : '—' }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
@@ -116,7 +116,7 @@
           <el-table-column prop="action" label="动作" min-width="130" />
           <el-table-column prop="ip_address" label="IP" width="120" />
           <el-table-column label="时间" min-width="150">
-            <template #default="{ row }">{{ row.created_at ? new Date(row.created_at).toLocaleString('zh-CN') : '—' }}</template>
+            <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
           </el-table-column>
         </el-table>
       </div>
@@ -128,6 +128,7 @@
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import * as echarts from 'echarts/core'
+import { formatDateTime } from '@/utils/format'
 import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'

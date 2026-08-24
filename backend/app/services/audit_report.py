@@ -1,7 +1,7 @@
 """合规审计报告：操作日志聚合统计 + 报告快照生成。"""
 import datetime as dt
 
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AuditReport, OperationLog
@@ -37,8 +37,8 @@ async def compute_audit_stats(
     today = dt.date.today()
     date_from = date_from or (today - dt.timedelta(days=13))
     date_to = date_to or today
-    start = dt.datetime.combine(date_from, dt.time.min).astimezone()
-    end = dt.datetime.combine(date_to + dt.timedelta(days=1), dt.time.min).astimezone()
+    start = dt.datetime.combine(date_from, dt.time.min, tzinfo=dt.timezone.utc)
+    end = dt.datetime.combine(date_to + dt.timedelta(days=1), dt.time.min, tzinfo=dt.timezone.utc)
 
     base = select(OperationLog).where(OperationLog.created_at >= start, OperationLog.created_at < end)
 

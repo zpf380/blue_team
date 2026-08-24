@@ -1,4 +1,4 @@
-# 开发环境基础设施（数据层）：PostgreSQL / Redis / InfluxDB / MinIO
+# 开发环境基础设施（数据层）：PostgreSQL / Redis / MinIO
 # 用法：docker compose -f deploy/docker-compose.dev.yml up -d
 # 后端本地 uvicorn 运行，前端 vite dev 运行（见 README）
 services:
@@ -27,21 +27,6 @@ services:
     volumes:
       - redis_data:/data
 
-  influxdb:
-    image: influxdb:2
-    container_name: bt-influxdb
-    ports:
-      - "8086:8086"
-    environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: admin
-      DOCKER_INFLUXDB_INIT_PASSWORD: adminpass
-      DOCKER_INFLUXDB_INIT_ORG: blueteam
-      DOCKER_INFLUXDB_INIT_BUCKET: metrics
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: blueteam-token
-    volumes:
-      - influxdb_data:/var/lib/influxdb2
-
   minio:
     image: minio/minio
     container_name: bt-minio
@@ -58,5 +43,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  influxdb_data:
   minio_data:

@@ -3,8 +3,6 @@
 - 上下文：调用方传入同一会话最近 N 轮 messages，见 ai_conversations.context_messages。
 - 安全：system prompt 限定蓝队防御角色；输入/输出由前端做 HTML 转义 + Markdown 白名单渲染。
 """
-from typing import Any
-
 import httpx
 
 from app.core.config import settings

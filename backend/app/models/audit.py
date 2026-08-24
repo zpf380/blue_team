@@ -1,7 +1,7 @@
 """操作审计表（只追加，禁止 UPDATE/DELETE）与合规审计报告。"""
 import datetime as dt
 
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 

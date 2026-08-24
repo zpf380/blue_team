@@ -3,33 +3,69 @@ import asyncio
 import datetime as dt
 import io
 import ipaddress
+import re
 
-from fastapi import APIRouter, Depends, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, Header, Query, Request, UploadFile
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.dependencies import get_client_ip, get_current_user, get_user_agent, require_permission, require_role
 from app.core.exceptions import AppError, ERR_CONFLICT, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_VALIDATION, ok_response
 from app.db.session import get_db
 from app.models import (
     Alert, ClientErrorReport, Department, Device, DevicePatrol, IPAllocation, IPSubnet, NetworkDiscovery,
-    OperationLog, ScanAuthorization, ScanReport, User,
+    OperationLog, Role, ScanAuthorization, ScanReport, User,
 )
 from app.schemas.common import Page
 from app.schemas.monitor import (
-    AlertCreate, AllocationCreate, AllocationUpdate, ClientErrorReportIn, DeviceCreate, DeviceDelete, DeviceUpdate,
-    DiscoveryCreate, DiscoveryRegister, ScanAuthCreate, ScanCreate, SubnetCreate, SubnetDelete, SubnetUpdate,
+    AlertCreate, AllocationCreate, AllocationUpdate, ClientErrorReportIn, DeviceCreate, DeviceUpdate,
+    DiscoveryCreate, DiscoveryRegister, ScanAuthCreate, ScanCreate, SubnetCreate, SubnetUpdate,
 )
 from app.services.audit_log import record
 from app.services.data_scope import apply_data_scope, apply_device_data_scope
 from app.services.notify import notify_alert_task
 from app.services.scan_policy import is_internal_ip, is_internal_network
-from app.services.scanner import launch_discovery, launch_scan
+from app.services.scanner import (
+    ScanOptions,
+    _options_from_dict,
+    _options_to_dict,
+    _validate_port_range,
+    cancel_scan,
+    launch_discovery,
+    launch_scan,
+)
 
 router = APIRouter(tags=["监控中心"])
 
 _ALERT_STATUSES = ("open", "acknowledged", "resolved")
+
+_MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
+
+
+async def _validate_device_refs(session: AsyncSession, department_id=None, owner_id=None, mac_address=None) -> None:
+    """设备外键与格式校验：department_id / owner_id 引用不存在返回 404；MAC 地址格式非法返回 400。"""
+    if department_id is not None and not await session.get(Department, department_id):
+        raise AppError(code=ERR_NOT_FOUND, message="部门不存在")
+    if owner_id is not None and not await session.get(User, owner_id):
+        raise AppError(code=ERR_NOT_FOUND, message="负责人不存在")
+    if mac_address and not _MAC_RE.match(mac_address):
+        raise AppError(code=ERR_VALIDATION, message="MAC 地址格式不正确（如 AA:BB:CC:DD:EE:FF）")
+
+
+async def _device_in_scope(session: AsyncSession, user: User, device_id: int) -> bool:
+    """设备是否在用户数据范围内（写操作门禁，与 get_device 一致）。"""
+    scoped = apply_data_scope(select(Device.id).where(Device.id == device_id), user, Device)
+    return bool((await session.execute(scoped)).scalar_one_or_none())
+
+
+async def _subnet_in_scope(session: AsyncSession, user: User, subnet_id: int | None) -> bool:
+    """子网是否在用户数据范围内（IPAM 写操作门禁，对齐 update_allocation）。"""
+    if not subnet_id:
+        return True
+    scoped = apply_data_scope(select(IPSubnet.id).where(IPSubnet.id == subnet_id), user, IPSubnet)
+    return bool((await session.execute(scoped)).scalar_one_or_none())
 
 
 # ---------- 设备 ----------
@@ -51,8 +87,8 @@ async def list_devices(
     status: str | None = None,
     device_type: str | None = None,
     department_id: int | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("monitor:device:view")),
 ):
@@ -82,10 +118,14 @@ async def create_device(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("monitor:device:manage")),
 ):
+    await _validate_device_refs(session, data.department_id, data.owner_id, data.mac_address)
     exists = (await session.execute(select(Device).where(Device.ip_address == data.ip_address))).scalar_one_or_none()
     if exists:
         raise AppError(code=ERR_CONFLICT, message="该 IP 已被设备占用")
-    d = Device(**data.model_dump())
+    payload = data.model_dump()
+    if payload.get("department_id") is None:
+        payload["department_id"] = user.department_id  # 归属创建者部门，保证 dept 数据范围自可见
+    d = Device(**payload)
     session.add(d)
     await session.flush()
     await record(
@@ -105,6 +145,10 @@ async def get_device(
     d = await session.get(Device, device_id)
     if not d:
         raise AppError(code=ERR_NOT_FOUND, message="设备不存在")
+    # 数据范围：与 list_devices 一致（dept/self 角色不得越权读他部门设备）
+    scoped = apply_data_scope(select(Device.id).where(Device.id == device_id), user, Device)
+    if not (await session.execute(scoped)).scalar_one_or_none():
+        raise AppError(code=ERR_FORBIDDEN, message="无权查看该设备")
     depts = {d.department_id: (await session.get(Department, d.department_id)).name} if d.department_id else {}
     owner = await session.get(User, d.owner_id) if d.owner_id else None
     return ok_response(data=_device_out(d, depts, {d.owner_id: (owner.real_name or owner.username)} if owner else {}))
@@ -121,7 +165,10 @@ async def update_device(
     d = await session.get(Device, device_id)
     if not d:
         raise AppError(code=ERR_NOT_FOUND, message="设备不存在")
+    if not await _device_in_scope(session, user, device_id):
+        raise AppError(code=ERR_FORBIDDEN, message="无权操作该设备")
     payload = data.model_dump(exclude_unset=True)
+    await _validate_device_refs(session, payload.get("department_id"), payload.get("owner_id"), payload.get("mac_address"))
     if "status" in payload and payload["status"] == "archived" and d.status != "archived":
         # 归档设备
         payload["status"] = "archived"
@@ -139,24 +186,30 @@ async def update_device(
 async def delete_device(
     device_id: int,
     request: Request,
-    payload: DeviceDelete | None = None,
+    reason: str | None = Query(None, max_length=200),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("monitor:device:manage")),
 ):
     d = await session.get(Device, device_id)
     if not d:
         raise AppError(code=ERR_NOT_FOUND, message="设备不存在")
-    has_alerts = (await session.execute(select(func.count()).select_from(Alert).where(Alert.device_id == device_id))).scalar_one()
-    if has_alerts:
-        # 有告警关联 → 归档保留
+    if not await _device_in_scope(session, user, device_id):
+        raise AppError(code=ERR_FORBIDDEN, message="无权操作该设备")
+    refs = {
+        "alerts": (await session.execute(select(func.count()).select_from(Alert).where(Alert.device_id == device_id))).scalar_one(),
+        "allocations": (await session.execute(select(func.count()).select_from(IPAllocation).where(IPAllocation.device_id == device_id))).scalar_one(),
+        "scan_reports": (await session.execute(select(func.count()).select_from(ScanReport).where(ScanReport.device_id == device_id))).scalar_one(),
+    }
+    if sum(refs.values()) > 0:
+        # 有引用关联（告警/IP 分配/扫描报告）→ 归档保留数据链
         d.status = "archived"
-        message = "设备存在关联告警，已归档保留"
+        message = "设备存在关联数据（告警/IP 分配/扫描报告），已归档保留"
     else:
         await session.delete(d)
         message = "设备已删除"
     await record(
         session, user, "monitor:device:delete", target_type="device", target_id=str(device_id),
-        detail={"archived": has_alerts > 0, "reason": (payload.reason if payload else None)},
+        detail={"archived": sum(refs.values()) > 0, "refs": refs, "reason": reason},
         ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
     )
     await session.commit()
@@ -164,6 +217,21 @@ async def delete_device(
 
 
 _DEVICE_EXPORT_COLUMNS = ["名称", "IP地址", "MAC地址", "设备类型", "厂商", "型号", "位置", "部门", "负责人", "状态", "最近在线", "创建时间"]
+# 导入表头归一：兼容导出的中文表头与模板英文表头
+_DEVICE_HEADER_ALIAS = {
+    "名称": "name", "IP地址": "ip_address", "IP 地址": "ip_address",
+    "MAC地址": "mac_address", "MAC 地址": "mac_address",
+    "设备类型": "device_type", "厂商": "manufacturer", "型号": "model",
+    "位置": "location", "部门": "department", "负责人": "owner", "状态": "status",
+}
+
+
+def _norm_device_row(row: dict) -> dict:
+    out = {}
+    for k, v in row.items():
+        key = str(k).strip() if k is not None else ""
+        out[_DEVICE_HEADER_ALIAS.get(key, key)] = v
+    return out
 
 
 @router.get("/monitor/devices/export")
@@ -233,11 +301,11 @@ async def import_devices(
         ws = wb.active
         header = [c.value for c in next(ws.iter_rows())]
         for r in ws.iter_rows(min_row=2):
-            rows.append({header[i]: (r[i].value if i < len(r) else None) for i in range(len(header))})
+            rows.append(_norm_device_row({header[i]: (r[i].value if i < len(r) else None) for i in range(len(header))}))
     elif filename.lower().endswith(".csv"):
         import csv
 
-        rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))))
+        rows = [_norm_device_row(r) for r in csv.DictReader(io.StringIO(raw.decode("utf-8-sig")))]
     else:
         raise AppError(code=ERR_VALIDATION, message="仅支持 .xlsx / .csv 文件")
 
@@ -262,10 +330,17 @@ async def import_devices(
         if status not in ("active", "offline", "maintenance", "archived"):
             errors.append({"row": idx, "error": f"状态 {status} 非法"})
             continue
+        mac = (values.get("mac_address") or "").strip()
+        if mac and not _MAC_RE.match(mac):
+            errors.append({"row": idx, "error": f"MAC {mac} 格式不正确"})
+            continue
         dept_name = (values.get("department") or "").strip()
+        if dept_name and dept_name not in depts:
+            errors.append({"row": idx, "error": f"部门 {dept_name} 不存在"})
+            continue
         session.add(Device(
             name=name, ip_address=ip,
-            mac_address=(values.get("mac_address") or "").strip() or None,
+            mac_address=mac or None,
             device_type=(values.get("device_type") or "").strip() or None,
             manufacturer=(values.get("manufacturer") or "").strip() or None,
             model=(values.get("model") or "").strip() or None,
@@ -293,10 +368,17 @@ async def ping_device(
     d = await session.get(Device, device_id)
     if not d:
         raise AppError(code=ERR_NOT_FOUND, message="设备不存在")
+    if not await _device_in_scope(session, user, device_id):
+        raise AppError(code=ERR_FORBIDDEN, message="无权操作该设备")
     if d.status == "archived":
         raise AppError(code=ERR_VALIDATION, message="设备已归档")
     d.last_seen_at = dt.datetime.now(dt.timezone.utc)
     d.status = "active"
+    await record(
+        session, user, "monitor:device:ping", target_type="device", target_id=str(device_id),
+        detail={"ip": str(d.ip_address)},
+        ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
+    )
     await session.commit()
     return ok_response(data={"last_seen_at": d.last_seen_at})
 
@@ -431,9 +513,17 @@ async def create_subnet(
                 code=ERR_CONFLICT,
                 message=f"网段 {str(other.network)}（{other.name}）与当前网段重叠或包含，请调整规划",
             )
+    if data.department_id is not None and not await session.get(Department, data.department_id):
+        raise AppError(code=ERR_NOT_FOUND, message="部门不存在")
     payload = data.model_dump()
     # 校验保留地址段，并规范化为 CIDR 列表
     payload["reserved_ranges"] = _validate_reserved_ranges(data.reserved_ranges, net)
+    # 显式传入网关时校验 IP 格式（对齐 update_subnet）
+    if payload.get("gateway"):
+        try:
+            ipaddress.ip_address(payload["gateway"])
+        except ValueError:
+            raise AppError(code=ERR_VALIDATION, message="网关格式不正确")
     # 网关留空 → 自动取子网第一个可用地址（如 10.0.30.1）
     if not payload.get("gateway") and net.version == 4:
         try:
@@ -456,7 +546,7 @@ async def create_subnet(
 async def delete_subnet(
     subnet_id: int,
     request: Request,
-    payload: SubnetDelete | None = None,
+    reason: str | None = Query(None, max_length=200),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("ipam:manage")),
 ):
@@ -474,7 +564,7 @@ async def delete_subnet(
     s.is_active = False
     await record(
         session, user, "ipam:subnet:delete", target_type="subnet", target_id=str(subnet_id),
-        detail={"name": s.name, "network": str(s.network), "reason": (payload.reason if payload else None)},
+        detail={"name": s.name, "network": str(s.network), "reason": reason},
         ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
     )
     await session.commit()
@@ -514,6 +604,8 @@ async def update_subnet(
         changes["vlan_id"] = data.vlan_id
         s.vlan_id = data.vlan_id
     if data.department_id is not None and data.department_id != s.department_id:
+        if not await session.get(Department, data.department_id):
+            raise AppError(code=ERR_NOT_FOUND, message="部门不存在")
         changes["department_id"] = data.department_id
         s.department_id = data.department_id
     if data.reserved_ranges is not None:
@@ -566,8 +658,8 @@ async def subnet_usage(
 async def list_allocations(
     subnet_id: int | None = None,
     keyword: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("monitor:device:view")),
 ):
@@ -640,6 +732,10 @@ async def create_allocation(
     scoped = apply_data_scope(select(IPSubnet.id).where(IPSubnet.id == subnet.id), user, IPSubnet)
     if not (await session.execute(scoped)).scalar_one_or_none():
         raise AppError(code=ERR_FORBIDDEN, message="无权操作该子网")
+    if data.allocated_to is not None and not await session.get(User, data.allocated_to):
+        raise AppError(code=ERR_NOT_FOUND, message="分配用户不存在")
+    if data.device_id is not None and not await session.get(Device, data.device_id):
+        raise AppError(code=ERR_NOT_FOUND, message="绑定设备不存在")
     # 先回收过期 DHCP 租约，确保自动分配拿到已到期地址
     await _recycle_expired_leases(session)
 
@@ -693,6 +789,8 @@ async def release_allocation(
     a = await session.get(IPAllocation, allocation_id)
     if not a:
         raise AppError(code=ERR_NOT_FOUND, message="分配记录不存在")
+    if not await _subnet_in_scope(session, user, a.subnet_id):
+        raise AppError(code=ERR_FORBIDDEN, message="无权操作该子网的分配")
     released_ip = str(a.ip_address)
     # 真删：ip_allocations 对 ip_address 有物理唯一约束，软删会导致该 IP 永不复用
     await session.delete(a)
@@ -780,8 +878,8 @@ async def list_alerts(
     status: str | None = None,
     severity: str | None = None,
     device_id: int | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("monitor:alert:view")),
 ):
@@ -1019,29 +1117,44 @@ async def create_scan(
         d = await session.get(Device, data.device_id)
         if not d:
             raise AppError(code=ERR_NOT_FOUND, message="设备不存在")
+    if data.ports and data.port_range:
+        raise AppError(code=ERR_VALIDATION, message="端口数与端口范围二选一")
+    if data.port_range:
+        try:
+            _validate_port_range(data.port_range)
+        except ValueError as e:
+            raise AppError(code=ERR_VALIDATION, message=str(e))
     await _validate_scan_target(session, data.target_ip)
+    opts = ScanOptions(
+        scan_type=data.scan_type or settings.NMAP_SCAN_TYPE,
+        top_ports=data.ports,
+        port_range=data.port_range,
+        service_detection=settings.NMAP_VERSION_DETECT,
+        nse=data.nse,
+    )
     report = ScanReport(
         report_type=data.report_type, device_id=data.device_id, target_ip=data.target_ip,
         scan_data=None, risk_score=None,
         summary=f"目标 {data.target_ip} 扫描排队中…", status="pending_review",
-        scan_status="pending", generated_by=user.id,
+        scan_status="pending", generated_by=user.id, scan_options=_options_to_dict(opts),
     )
     session.add(report)
     await session.flush()
     await record(
         session, user, "monitor:scan:create", target_type="scan_report", target_id=str(report.id),
-        detail={"target": data.target_ip}, ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
+        detail={"target": data.target_ip, "scan_type": opts.scan_type, "nse": opts.nse},
+        ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
     )
     await session.commit()
-    launch_scan(report.id, data.target_ip, data.ports)  # 后台执行，立即返回
+    launch_scan(report.id, data.target_ip, opts)  # 后台执行，立即返回
     return ok_response(data={"report_id": report.id, "scan_status": "pending"})
 
 
 @router.get("/monitor/scans/reports")
 async def list_scan_reports(
     status: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("monitor:scan")),
 ):
@@ -1057,7 +1170,8 @@ async def list_scan_reports(
         {
             "id": r.id, "report_type": r.report_type, "device_id": r.device_id, "device_name": devices.get(r.device_id),
             "target_ip": r.target_ip, "risk_score": r.risk_score, "summary": r.summary, "status": r.status,
-            "scan_status": r.scan_status, "error": r.error,
+            "scan_status": r.scan_status, "error": r.error, "error_code": r.error_code,
+            "scan_options": r.scan_options,
             "generated_by": r.generated_by, "generated_by_name": users.get(r.generated_by),
             "approved_by": r.approved_by, "approved_by_name": users.get(r.approved_by),
             "generated_at": r.generated_at,
@@ -1075,15 +1189,71 @@ async def get_scan_report(
     r = await session.get(ScanReport, report_id)
     if not r:
         raise AppError(code=ERR_NOT_FOUND, message="报告不存在")
+    # 数据范围：与 list_scan_reports 一致（按设备归属过滤）；创建者本人始终可看自己的报告
+    # （无设备关联的目标 IP 扫描报告，dept/self 角色不能因无设备归属而失去对自己报告的访问）
+    scoped = apply_device_data_scope(select(ScanReport.id).where(ScanReport.id == report_id), user, ScanReport)
+    if r.generated_by != user.id and not (await session.execute(scoped)).scalar_one_or_none():
+        raise AppError(code=ERR_FORBIDDEN, message="无权查看该报告")
     users = {u.id: (u.real_name or u.username) for u in (await session.execute(select(User).where(User.id.in_([r.generated_by, r.approved_by] if r.approved_by else [r.generated_by])))).scalars()} if (r.generated_by or r.approved_by) else {}
     device = await session.get(Device, r.device_id) if r.device_id else None
     return ok_response(data={
         "id": r.id, "report_type": r.report_type, "device_id": r.device_id, "device_name": device.name if device else None,
         "target_ip": r.target_ip, "scan_data": r.scan_data, "summary": r.summary, "risk_score": r.risk_score,
-        "status": r.status, "scan_status": r.scan_status, "error": r.error,
+        "status": r.status, "scan_status": r.scan_status, "error": r.error, "error_code": r.error_code,
+        "scan_options": r.scan_options,
         "generated_by_name": users.get(r.generated_by),
         "approved_by_name": users.get(r.approved_by), "generated_at": r.generated_at,
     })
+
+
+@router.post("/monitor/scans/reports/{report_id}/cancel")
+async def cancel_scan_api(
+    report_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("monitor:scan")),
+):
+    """取消进行中的扫描任务（pending/running → failed/cancelled）。"""
+    r = await session.get(ScanReport, report_id)
+    if not r:
+        raise AppError(code=ERR_NOT_FOUND, message="报告不存在")
+    if r.scan_status not in ("pending", "running"):
+        raise AppError(code=ERR_VALIDATION, message="当前状态不可取消")
+    if not cancel_scan(report_id):
+        # 进程内无活动任务（单 worker 极罕见）→ 幂等直接落失败
+        r.scan_status, r.error, r.error_code = "failed", "扫描已被取消", "cancelled"
+    await record(
+        session, user, "monitor:scan:cancel", target_type="scan_report", target_id=str(report_id),
+        detail={}, ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
+    )
+    await session.commit()
+    return ok_response(message="已请求取消")
+
+
+@router.post("/monitor/scans/reports/{report_id}/retry")
+async def retry_scan_api(
+    report_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("monitor:scan")),
+):
+    """重试失败的扫描（仅 failed 可重试；沿用原扫描选项，重置执行生命周期）。"""
+    r = await session.get(ScanReport, report_id)
+    if not r:
+        raise AppError(code=ERR_NOT_FOUND, message="报告不存在")
+    if r.scan_status != "failed":
+        raise AppError(code=ERR_VALIDATION, message="仅失败任务可重试")
+    opts = _options_from_dict(r.scan_options)
+    r.scan_status, r.error, r.error_code = "pending", None, None
+    r.scan_data, r.risk_score = None, None
+    r.summary = f"目标 {r.target_ip} 重试排队中…"
+    await record(
+        session, user, "monitor:scan:retry", target_type="scan_report", target_id=str(report_id),
+        detail={}, ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
+    )
+    await session.commit()
+    launch_scan(report_id, str(r.target_ip), opts)  # INET 列读回的是 ipaddress 对象，str 归一化
+    return ok_response(data={"report_id": report_id, "scan_status": "pending"})
 
 
 @router.post("/monitor/scans/reports/{report_id}/review")
@@ -1166,8 +1336,15 @@ async def get_discovery(
     d = await session.get(NetworkDiscovery, discovery_id)
     if not d:
         raise AppError(code=ERR_NOT_FOUND, message="发现记录不存在")
-    scoped = apply_data_scope(select(IPSubnet.id).where(IPSubnet.id == d.subnet_id), user, IPSubnet)
-    if d.subnet_id and not (await session.execute(scoped)).scalar_one_or_none():
+    # 数据范围：对齐 list_discoveries——关联子网的发现按子网归属过滤；
+    # 手动网段（subnet_id IS NULL）记录仅全量权限角色（admin/manager）可读。
+    role = getattr(user, "_role", None)
+    full_scope = role is not None and (role.data_scope == "all" or role.code == "admin")
+    if d.subnet_id:
+        scoped = apply_data_scope(select(IPSubnet.id).where(IPSubnet.id == d.subnet_id), user, IPSubnet)
+        if not (await session.execute(scoped)).scalar_one_or_none():
+            raise AppError(code=ERR_FORBIDDEN, message="无权查看该发现记录")
+    elif not full_scope:
         raise AppError(code=ERR_FORBIDDEN, message="无权查看该发现记录")
     subnet = await session.get(IPSubnet, d.subnet_id) if d.subnet_id else None
     creator = await session.get(User, d.created_by) if d.created_by else None
@@ -1188,8 +1365,8 @@ async def get_discovery(
 @router.get("/monitor/discover")
 async def list_discoveries(
     subnet_id: int | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("monitor:device:view")),
 ):
@@ -1222,8 +1399,8 @@ async def list_discoveries(
 # ---------- 设备自动巡检（后台定时，状态刷新 + 结果追溯） ----------
 @router.get("/monitor/patrols")
 async def list_patrols(
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("monitor:device:view")),
 ):

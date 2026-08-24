@@ -1,12 +1,12 @@
 """聊天频道与消息 API：角色隔离 / 收发 / 已读 / 撤回 / 全文检索 / 私聊(DM)。"""
 import datetime as dt
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_client_ip, get_current_user, get_user_agent, require_permission
-from app.core.exceptions import AppError, ERR_CONFLICT, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_VALIDATION, ok_response
+from app.core.dependencies import get_client_ip, get_user_agent, require_permission
+from app.core.exceptions import AppError, ERR_CONFLICT, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_RATE_LIMIT, ERR_VALIDATION, ok_response
 from app.db.session import get_db
 from app.models import Channel, ChannelMember, Contact, ContactRequest, Message, Role, User
 from app.schemas.chat import (
@@ -265,7 +265,7 @@ async def channel_members(
 async def list_messages(
     channel_id: int,
     before_id: int | None = None,
-    size: int = 50,
+    size: int = Query(50, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("chat:view")),
 ):
@@ -284,7 +284,7 @@ async def list_messages(
     query = select(Message).where(Message.channel_id == channel_id)
     if before_id:
         query = query.where(Message.id < before_id)
-    rows = (await session.execute(query.order_by(Message.id.desc()).limit(min(size, 100)))).scalars().all()
+    rows = (await session.execute(query.order_by(Message.id.desc()).limit(size))).scalars().all()
     rows.reverse()
     sender_ids = {m.sender_id for m in rows if m.sender_id}
     names = {}
@@ -353,8 +353,11 @@ async def search_messages(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("chat:view")),
 ):
-    if not q.strip():
+    q = q.strip()
+    if not q:
         return ok_response(data=[])
+    if len(q) > 100:
+        raise AppError(code=ERR_VALIDATION, message="搜索关键词过长（最长 100 字）")
     query = select(Message).where(Message.is_deleted.is_(False))
     if channel_id:
         await _get_channel(session, channel_id, user)
@@ -517,6 +520,17 @@ async def send_contact_request(
     ).scalar_one_or_none()
     if pending:
         raise AppError(code=ERR_CONFLICT, message="已有待处理的添加请求")
+    # 频率限制：10 分钟内发出的添加请求不超过 20 条，防联系人轰炸
+    recent_sent = (
+        await session.execute(
+            select(func.count()).select_from(ContactRequest).where(
+                ContactRequest.requester_id == user.id,
+                ContactRequest.created_at >= dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10),
+            )
+        )
+    ).scalar_one()
+    if recent_sent >= 20:
+        raise AppError(code=ERR_RATE_LIMIT, message="添加联系人请求过于频繁，请稍后再试")
     req = ContactRequest(requester_id=user.id, target_id=target.id, status="pending")
     session.add(req)
     await record(

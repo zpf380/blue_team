@@ -62,7 +62,11 @@ async def test_change_password_revokes_refresh(client):
         assert resp.json()["code"] == 0
 
         # 旧刷新令牌已吊销
-        resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+        resp = await client.post(
+            "/api/v1/auth/refresh",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            json={"refresh_token": refresh_token},
+        )
         assert resp.json()["code"] == 40100
 
         # 新密码可登录
@@ -170,3 +174,127 @@ async def test_unknown_route_maps_to_404(client):
     body = resp.json()
     assert resp.status_code == 404
     assert body["code"] == 40400
+
+
+@pytest.mark.asyncio
+async def test_delete_user_ref_protection(client, test_session):
+    """删除引用保护（对齐部门 409 模式）：无引用的用户物理删除；被业务数据引用的用户 409+明细。"""
+    from sqlalchemy import delete, select
+
+    from app.models import Device, User
+
+    admin = await _login(client, "admin", "admin123")
+    tok = admin["access_token"]
+
+    # 无引用、无审计日志的新用户 → 物理删除
+    clean = await _create_user(client, tok, f"cln_{uuid.uuid4().hex[:8]}", "analyst")
+    resp = await client.delete(f"/api/v1/users/{clean['id']}", headers=_h(tok))
+    assert resp.json()["code"] == 0, resp.json()
+    assert resp.json()["data"]["action"] == "deleted"
+
+    # 被设备引用（owner_id）且无审计日志 → 409 + refs 明细，不再裸 500
+    owned = await _create_user(client, tok, f"own_{uuid.uuid4().hex[:8]}", "analyst")
+    dev_ip = f"10.9.{int(uuid.uuid4().hex[:4], 16) % 200 + 1}.7"
+    resp = await client.post("/api/v1/monitor/devices", headers=_h(tok), json={
+        "name": f"ref-{owned['id']}", "ip_address": dev_ip, "device_type": "server",
+        "owner_id": owned["id"],
+    })
+    assert resp.json()["code"] == 0, resp.json()
+    dev_id = resp.json()["data"]["id"]
+    try:
+        resp = await client.delete(f"/api/v1/users/{owned['id']}", headers=_h(tok))
+        assert resp.json()["code"] == 40900, resp.json()
+        assert resp.json()["data"]["devices"] >= 1
+        # 清理引用后即可删除
+        await test_session.execute(delete(Device).where(Device.id == dev_id))
+        await test_session.commit()
+        resp = await client.delete(f"/api/v1/users/{owned['id']}", headers=_h(tok))
+        assert resp.json()["code"] == 0, resp.json()
+    finally:
+        await test_session.execute(delete(Device).where(Device.id == dev_id))
+        await test_session.commit()
+        (await test_session.execute(delete(User).where(User.id == owned["id"]))).rowcount
+        await test_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_workspace_stats_per_role(client):
+    """角色工作台聚合接口：各角色返回对应统计字段，且不越权返回其他角色数据。"""
+    cases = {
+        "manager01": {"pending_reports", "unresolved_alerts", "pending_leaves", "training_top", "compliance"},
+        "analyst01": {"open_alerts", "dept_alerts", "my_devices", "ai_conversations"},
+        "trainee01": {"total_score", "badges", "completed_scenarios", "learning_days_30d"},
+        "auditor01": {"today_ops", "anomalies", "compliance", "pending_reviews"},
+    }
+    for username, expected_keys in cases.items():
+        d = await _login(client, username, "Bt@123456")
+        resp = await client.get("/api/v1/stats/workspace", headers=_h(d["access_token"]))
+        body = resp.json()
+        assert body["code"] == 0, body
+        data = body["data"]
+        assert data["role"] == username.rstrip("01")
+        assert set(data["stats"].keys()) == expected_keys, (username, data["stats"].keys())
+
+
+@pytest.mark.asyncio
+async def test_user_fk_validation(client):
+    """外键存在性校验（批次3）：role_id / department_id 引用不存在 → 40400，不再裸 500。"""
+    admin = await _login(client, "admin", "admin123")
+    tok = admin["access_token"]
+
+    # 创建用户时 role_id 不存在 → 40400
+    resp = await client.post("/api/v1/users", headers=_h(tok), json={
+        "username": f"fk_{uuid.uuid4().hex[:8]}", "password": "Bt@123456", "role_id": 999999,
+    })
+    assert resp.json()["code"] == 40400, resp.json()
+    assert "角色不存在" in resp.json()["message"]
+
+    # 更新用户时 department_id 不存在 → 40400
+    name = f"fkd_{uuid.uuid4().hex[:8]}"
+    tmp = await _create_user(client, tok, name, "analyst")
+    try:
+        resp = await client.put(f"/api/v1/users/{tmp['id']}", headers=_h(tok), json={"department_id": 999999})
+        assert resp.json()["code"] == 40400, resp.json()
+        assert "部门不存在" in resp.json()["message"]
+    finally:
+        await client.delete(f"/api/v1/users/{tmp['id']}", headers=_h(tok))
+
+
+@pytest.mark.asyncio
+async def test_pagination_size_boundaries(client):
+    """分页 size 治理（批次3）：越界 size 由 FastAPI 校验拒绝（422 + 40001），含 size=-1。"""
+    admin = await _login(client, "admin", "admin123")
+    tok = admin["access_token"]
+
+    for url, params in [
+        ("/api/v1/users", {"size": 101}),
+        ("/api/v1/users", {"size": 0}),
+        ("/api/v1/users", {"page": 0}),
+        ("/api/v1/audit/reports", {"size": 1000}),
+        ("/api/v1/audit/logs", {"size": -1}),
+    ]:
+        resp = await client.get(url, headers=_h(tok), params=params)
+        assert resp.status_code == 422, (url, params, resp.status_code)
+        assert resp.json()["code"] == 40001, (url, params, resp.json())
+
+    # 请假列表（leave:apply 权限，trainee01 可用）
+    trainee = await _login(client, "trainee01", "Bt@123456")
+    resp = await client.get("/api/v1/leaves/mine", headers=_h(trainee["access_token"]), params={"size": 200})
+    assert resp.status_code == 422 and resp.json()["code"] == 40001
+    # 审批列表（manager01）
+    manager = await _login(client, "manager01", "Bt@123456")
+    resp = await client.get("/api/v1/leaves", headers=_h(manager["access_token"]), params={"size": -1})
+    assert resp.status_code == 422 and resp.json()["code"] == 40001
+
+
+@pytest.mark.asyncio
+async def test_import_users_corrupted_xlsx(client):
+    """批量导入兜底（批次3）：损坏的 .xlsx 返回 40001 而非 500。"""
+    admin = await _login(client, "admin", "admin123")
+    resp = await client.post(
+        "/api/v1/users/import",
+        headers=_h(admin["access_token"]),
+        files={"file": ("users.xlsx", b"\x50\x4b\x03\x04 broken-not-zip", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert resp.json()["code"] == 40001, resp.json()
+    assert "解析失败" in resp.json()["message"]

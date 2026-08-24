@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_client_ip, get_current_user, get_user_agent
-from app.core.exceptions import AppError, ERR_CONFLICT, ERR_UNAUTHORIZED, ERR_VALIDATION, ok_response
+from app.core.exceptions import AppError, ERR_CONFLICT, ERR_FORBIDDEN, ERR_UNAUTHORIZED, ERR_VALIDATION, ok_response
 from app.core.security import (
     create_access_token,
     create_mfa_token,
@@ -359,8 +359,15 @@ async def mfa_disable(
     return ok_response(message="MFA 已解绑")
 
 
+def _require_xhr(request: Request) -> None:
+    """Cookie 认证的写端点做 CSRF 双重校验：必须携带 X-Requested-With（浏览器跨站表单无法伪造）。"""
+    if request.headers.get("x-requested-with") != "XMLHttpRequest":
+        raise AppError(code=ERR_FORBIDDEN, message="非法请求来源")
+
+
 @router.post("/refresh")
 async def refresh(data: RefreshIn, request: Request, response: Response, session: AsyncSession = Depends(get_db)):
+    _require_xhr(request)
     token = data.refresh_token or request.cookies.get("refresh_token", "")
     if not token:
         raise AppError(code=ERR_UNAUTHORIZED, message="刷新令牌缺失")
@@ -394,6 +401,7 @@ async def refresh(data: RefreshIn, request: Request, response: Response, session
 
 @router.post("/logout")
 async def logout(data: RefreshIn, request: Request, response: Response, session: AsyncSession = Depends(get_db)):
+    _require_xhr(request)
     token = data.refresh_token or request.cookies.get("refresh_token", "")
     if token:
         row = (

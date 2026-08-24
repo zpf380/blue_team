@@ -3,12 +3,12 @@ import csv
 import datetime as dt
 import io
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_client_ip, get_current_user, get_user_agent, require_role
+from app.core.dependencies import get_client_ip, get_user_agent, require_role
 from app.core.exceptions import AppError, ERR_NOT_FOUND, ERR_VALIDATION, ok_response
 from app.db.session import get_db
 from app.models import AuditReport, OperationLog, User
@@ -27,8 +27,8 @@ async def list_logs(
     action: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     current: User = Depends(require_role(["admin", "auditor"])),
 ):
@@ -43,8 +43,8 @@ async def list_logs(
         if date_from and len(date_from) > 10:
             fmt = "%Y-%m-%d %H:%M:%S"
         try:
-            start = dt.datetime.strptime(date_from, fmt).astimezone() if date_from else None
-            end = dt.datetime.strptime(date_to, fmt).astimezone() if date_to else None
+            start = dt.datetime.strptime(date_from, fmt).astimezone(dt.timezone.utc) if date_from else None
+            end = dt.datetime.strptime(date_to, fmt).astimezone(dt.timezone.utc) if date_to else None
         except ValueError:
             raise AppError(code=ERR_VALIDATION, message="日期格式应为 YYYY-MM-DD")
         if start:
@@ -87,6 +87,11 @@ async def export_logs(
     current: User = Depends(require_role(["admin", "auditor"])),
 ):
     rows = (await session.execute(select(OperationLog).order_by(OperationLog.id.desc()).limit(5000))).scalars().all()
+    await record(
+        session, current, "audit:log:export", detail={"count": len(rows)},
+        ip_address=await get_client_ip(request), user_agent=await get_user_agent(request),
+    )
+    await session.commit()
     import csv
 
     buf = io.StringIO()
@@ -137,8 +142,8 @@ async def create_audit_report(
 @router.get("/reports")
 async def list_audit_reports(
     report_type: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_role(["admin", "auditor"])),
 ):

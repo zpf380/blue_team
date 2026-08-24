@@ -17,6 +17,7 @@
         :mine="m.sender_type === 'user' && m.sender_id === userStore.userInfo?.id"
         :can-recall="m.sender_type === 'user'"
         @recall="onRecall"
+        @regenerate="onRegenerate"
       />
     </div>
 
@@ -69,6 +70,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { chatApi } from '@/api/chat'
 import { aiApi } from '@/api/ai'
+import { formatDateTime } from '@/utils/format'
 import { fileApi } from '@/api/files'
 import { useChatStore } from '@/stores/chat'
 import { useUserStore } from '@/stores/user'
@@ -107,7 +109,7 @@ function typeText(t) { return { public: '公开', private: '私密', trainee: '�
 function typeTag(t) { return { public: 'success', private: 'warning', trainee: 'info' }[t] || 'info' }
 const wsTag = computed(() => (chat.wsStatus === 'connected' ? 'success' : 'info'))
 const wsText = computed(() => (chat.wsStatus === 'connected' ? '实时在线' : '连接中…'))
-function formatTime(s) { return s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '' }
+function formatTime(s) { return formatDateTime(s) }
 
 async function init() {
   if (props.channel) {
@@ -199,6 +201,54 @@ async function onRecall(msg) {
     await chat.recallMessage(msg.id)
     ElMessage.success('已撤回')
   } catch { /* 错误提示已由拦截器处理 */ }
+}
+
+// AI 消息重新生成：复用触发它的提问，在同一会话追加一轮新回复；
+// 旧回复本地移除，新回复经 WS 广播追加在尾部
+async function onRegenerate(msg) {
+  const idx = chat.messages.findIndex((m) => m.id === msg.id)
+  if (idx < 0) return
+  let query = null
+  for (let i = idx - 1; i >= 0; i--) {
+    const m = chat.messages[i]
+    if (m.sender_type === 'user' && m.message_type === 'text' && m.content) {
+      query = m.content
+      break
+    }
+  }
+  if (!query) {
+    ElMessage.warning('找不到对应的提问，无法重新生成')
+    return
+  }
+  aiLoading.value = true
+  try {
+    const data = await aiApi.invoke({
+      query,
+      channel_id: channel.value.id,
+      conversation_id: conversationId,
+    })
+    conversationId = data.conversation_id
+    const localIdx = chat.messages.findIndex((m) => m.id === msg.id)
+    if (localIdx >= 0) chat.messages.splice(localIdx, 1)
+    // WS 未连接时本地补一条，避免「重新生成」后无回复
+    if (chat.wsStatus !== 'connected') {
+      chat.messages.push({
+        id: `local-ai-${Date.now()}`,
+        channel_id: channel.value.id,
+        sender_id: null,
+        sender_name: `AI·${data.provider}`,
+        sender_type: 'ai_agent',
+        ai_agent_name: data.provider,
+        message_type: 'text',
+        content: data.reply,
+        is_deleted: false,
+        created_at: new Date().toISOString()
+      })
+    }
+    nextTick(scrollBottom)
+  } catch { /* 错误提示已由拦截器处理 */ } finally {
+    aiLoading.value = false
+  }
 }
 
 async function askAI() {

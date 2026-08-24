@@ -1,7 +1,7 @@
 """考勤 API：休假/外勤申请、审批、取消（申请由定时任务按时间自动生效/恢复）。"""
 import datetime as dt
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,11 +12,19 @@ from app.models import Department, LeaveRequest, Role, User
 from app.schemas.common import Page
 from app.schemas.leave import LeaveCreate, LeaveReviewIn
 from app.services.audit_log import record
+from app.services.data_scope import apply_data_scope
 
 router = APIRouter(prefix="/leaves", tags=["考勤管理"])
 
 # 申请在以下状态期间仍占用该时间段（不可重叠再申请）
 _ACTIVE_LEAVE_STATUSES = ("pending", "approved", "in_progress")
+
+
+def _as_utc(d: dt.datetime) -> dt.datetime:
+    """归一化时间：无时区的按 UTC 解释（客户端常见），带时区的统一转 UTC。"""
+    if d.tzinfo is None:
+        return d.replace(tzinfo=dt.timezone.utc)
+    return d.astimezone(dt.timezone.utc)
 
 
 def _leave_out(lr: LeaveRequest, users: dict[int, str], depts: dict[int, str], user_dept: dict[int, int]) -> dict:
@@ -92,9 +100,11 @@ async def create_leave(
     user: User = Depends(require_permission("leave:apply")),
 ):
     now = dt.datetime.now(dt.timezone.utc)
-    if data.end_at <= data.start_at:
+    start = _as_utc(data.start_at)
+    end = _as_utc(data.end_at)
+    if end <= start:
         raise AppError(code=ERR_VALIDATION, message="结束时间必须晚于开始时间")
-    if data.start_at < now:
+    if start < now:
         raise AppError(code=ERR_VALIDATION, message="开始时间不能早于当前时间")
 
     # 时间段重叠冲突：本人已有待审批/生效/已生效未结束的申请占用了该时段
@@ -113,7 +123,10 @@ async def create_leave(
     if overlap:
         raise AppError(code=ERR_CONFLICT, message="该时间段已有待审批/生效的休假或外勤申请")
 
-    lr = LeaveRequest(**data.model_dump(), user_id=user.id)
+    payload = data.model_dump()
+    payload["start_at"] = start
+    payload["end_at"] = end
+    lr = LeaveRequest(**payload, user_id=user.id)
     session.add(lr)
     await session.flush()
     await record(
@@ -129,8 +142,8 @@ async def create_leave(
 async def my_leaves(
     leave_type: str | None = None,
     status: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("leave:apply")),
 ):
@@ -190,12 +203,15 @@ async def cancel_leave(
 async def list_leaves(
     leave_type: str | None = None,
     status: str = "pending",
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(require_permission("leave:approve")),
 ):
-    query = select(LeaveRequest)
+    # 数据范围：按申请人（LeaveRequest.user_id → User）归属过滤，dept 审批人仅见本部门申请
+    query = apply_data_scope(
+        select(LeaveRequest).join(User, User.id == LeaveRequest.user_id), user, User
+    )
     if leave_type:
         query = query.where(LeaveRequest.leave_type == leave_type)
     if status:
@@ -233,6 +249,16 @@ async def _review_workflow(session: AsyncSession, user: User, request: Request, 
         raise AppError(code=ERR_VALIDATION, message="该申请已处理")
     if lr.user_id == user.id:
         raise AppError(code=ERR_VALIDATION, message="不能审批自己的申请")
+
+    # 审批数据范围：dept/self 角色不得审批范围外申请（当前仅 admin/manager 可审批，均为 all 范围）
+    role = getattr(user, "_role", None)
+    scope = role.data_scope if role else "self"
+    if scope not in ("all",) and not (role and role.code == "admin"):
+        requester = await session.get(User, lr.user_id)
+        if scope == "self" and (not requester or requester.id != user.id):
+            raise AppError(code=ERR_FORBIDDEN, message="无权审批该申请")
+        if scope == "dept" and (not requester or requester.department_id != user.department_id):
+            raise AppError(code=ERR_FORBIDDEN, message="无权审批其他部门的申请")
 
     lr.status = "approved" if action == "approve" else "rejected"
     lr.approver_id = user.id

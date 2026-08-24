@@ -114,3 +114,9 @@ class ScanCreate(BaseModel):
     report_type: str = Field(default="on_demand", pattern="^(daily|weekly|monthly|on_demand)$")
     device_id: Optional[int] = None
     ports: Optional[int] = Field(default=None, ge=1, le=10000)  # None → 用 NMAP_TOP_PORTS
+    # 与 ports 二选一；语义校验在 API 层（_validate_port_range）
+    port_range: Optional[str] = Field(default=None, max_length=200, pattern=r"^[0-9,\-]{1,200}$")
+    # None → 用 NMAP_SCAN_TYPE
+    scan_type: Optional[str] = Field(default=None, pattern="^(sS|sT|sU)$")
+    # per-scan NSE 开关；实际生效还看 NMAP_NSE_SCRIPTS 是否非空
+    nse: bool = True

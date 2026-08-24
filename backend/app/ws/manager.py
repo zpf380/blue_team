@@ -3,7 +3,6 @@
 连接表：channel_id -> user_id -> ConnectionInfo。
 """
 import asyncio
-import datetime as dt
 import time
 from dataclasses import dataclass, field
 
@@ -39,9 +38,6 @@ class ConnectionManager:
         conn = self._channels.get(channel_id, {}).get(user_id)
         if conn:
             conn.last_seen = time.time()
-
-    def connected_users(self, channel_id: int) -> list[int]:
-        return list(self._channels.get(channel_id, {}).keys())
 
     async def broadcast(self, channel_id: int, message: dict, exclude_user_id: int | None = None) -> None:
         """向频道内所有在线连接推送消息，逐个容错。"""

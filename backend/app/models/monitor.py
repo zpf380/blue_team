@@ -140,6 +140,9 @@ class ScanReport(Base):
     # pending / running / completed / failed —— 扫描执行生命周期（与 status 审核流正交）
     scan_status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)  # 失败原因（截断 500 字符）
+    scan_options: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # 本次扫描生效选项快照（重试/漂移对比用）
+    # cancelled / timeout / permission / unreachable / generic —— 失败原因分类（NULL=未失败）
+    error_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
 class NetworkDiscovery(Base):

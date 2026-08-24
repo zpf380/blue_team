@@ -1,6 +1,5 @@
 """FastAPI 依赖：当前用户、权限、角色白名单、审计员写拦截。"""
 from fastapi import Depends, Header, Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError, ERR_FORBIDDEN_PERM, ERR_UNAUTHORIZED

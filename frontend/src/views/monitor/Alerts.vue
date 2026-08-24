@@ -24,7 +24,8 @@
         <el-button type="primary" plain @click="load">查询</el-button>
       </div>
 
-      <el-table :data="items" stripe>
+      <el-empty v-if="!items.length && !loading" description="暂无告警" />
+      <el-table v-else :data="items" stripe>
         <el-table-column label="级别" width="90">
           <template #default="{ row }">
             <el-tag size="small" :type="sevTag(row.severity)">{{ sevText(row.severity) }}</el-tag>
@@ -100,10 +101,10 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { monitorApi } from '@/api/monitor'
 
-const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN') : '—')
+import { formatDateTime as fmt } from '@/utils/format'
 const severities = [
   { value: 'critical', label: '严重', tag: 'danger' },
   { value: 'high', label: '高危', tag: 'danger' },
@@ -176,6 +177,11 @@ async function ack(row) {
 }
 
 async function resolve(row) {
+  try {
+    await ElMessageBox.confirm(`确认将告警「${row.title}」标记为已解决？`, '解决告警', { type: 'info' })
+  } catch {
+    return // 用户取消
+  }
   try {
     await monitorApi.resolveAlert(row.id)
     ElMessage.success('已解决')

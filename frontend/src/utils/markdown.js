@@ -26,7 +26,3 @@ export function renderMarkdown(text) {
   const html = marked.parse(String(text))
   return DOMPurify.sanitize(html)
 }
-
-export function escapeHtml(text) {
-  return String(text ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
-}

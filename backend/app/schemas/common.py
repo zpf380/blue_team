@@ -11,7 +11,3 @@ class Page(BaseModel, Generic[T]):
     total: int
     page: int
     size: int
-
-
-class OK(BaseModel):
-    ok: bool = True

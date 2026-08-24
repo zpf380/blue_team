@@ -28,12 +28,14 @@
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="username" label="操作人" width="100" />
       <el-table-column prop="role_code" label="角色" width="95" />
-      <el-table-column prop="action" label="操作" width="150" />
+      <el-table-column prop="action" label="操作" width="150">
+        <template #default="{ row }">{{ actionLabel(row.action) }}</template>
+      </el-table-column>
       <el-table-column prop="target_type" label="对象类型" width="100" />
       <el-table-column prop="target_id" label="对象 ID" width="90" />
       <el-table-column prop="ip_address" label="IP" width="130" />
       <el-table-column prop="created_at" label="时间" min-width="170">
-        <template #default="{ row }">{{ row.created_at ? new Date(row.created_at).toLocaleString() : '—' }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
     </el-table>
 
@@ -53,6 +55,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { auditApi } from '@/api/audit'
 import { downloadWithAuth } from '@/utils/download'
+import { formatDateTime } from '@/utils/format'
 
 const rows = ref([])
 const total = ref(0)
@@ -68,8 +71,26 @@ const actionOptions = [
   { value: 'user:delete', label: '删除用户' },
   { value: 'user:import', label: '导入用户' },
   { value: 'user:export', label: '导出用户' },
-  { value: 'audit:log:view', label: '查看审计' }
+  { value: 'audit:log:view', label: '查看审计' },
+  { value: 'ipam:subnet:create', label: '创建子网' },
+  { value: 'ipam:subnet:update', label: '编辑子网' },
+  { value: 'ipam:subnet:delete', label: '删除子网' },
+  { value: 'ipam:alloc:create', label: '分配地址' },
+  { value: 'ipam:alloc:update', label: '编辑分配' },
+  { value: 'ipam:alloc:release', label: '释放地址' },
+  { value: 'monitor:device:create', label: '创建设备' },
+  { value: 'monitor:device:update', label: '编辑设备' },
+  { value: 'monitor:device:delete', label: '删除设备' },
+  { value: 'monitor:scan:create', label: '发起扫描' },
+  { value: 'training:course:publish', label: '发布课程' },
+  { value: 'leave:create', label: '提交休假' },
+  { value: 'leave:review', label: '审批休假' }
 ]
+
+function actionLabel(action) {
+  const m = actionOptions.find((a) => a.value === action)
+  return m ? m.label : '其他'
+}
 
 async function load() {
   loading.value = true

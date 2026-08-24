@@ -55,8 +55,8 @@ SAMPLE_XML = """<?xml version="1.0"?>
 """
 
 
-async def _fake_nmap(target, ports, service_detection):
-    return 0, SAMPLE_XML
+async def _fake_nmap(target, ports, service_detection, scan_options=None):
+    return 0, SAMPLE_XML, ""
 
 
 @pytest.mark.asyncio
@@ -97,7 +97,7 @@ async def test_device_crud_and_data_scope(client):
     assert resp.json()["data"]["last_seen_at"]
 
     # 删除（无告警 → 真删，带删除原因 → 写入审计 detail）
-    resp = await client.request("DELETE", f"/api/v1/monitor/devices/{dev_id}", headers=_h(analyst_t), json={"reason": "测试清理"})
+    resp = await client.request("DELETE", f"/api/v1/monitor/devices/{dev_id}", headers=_h(analyst_t), params={"reason": "测试清理"})
     assert resp.json()["data"]["message"] == "设备已删除"
 
 
@@ -113,7 +113,7 @@ async def test_device_delete_reason_in_audit(client, test_session):
     assert resp.json()["code"] == 0, resp.json()
     dev_id = resp.json()["data"]["id"]
 
-    resp = await client.request("DELETE", f"/api/v1/monitor/devices/{dev_id}", headers=_h(analyst_t), json={"reason": "设备报废下线"})
+    resp = await client.request("DELETE", f"/api/v1/monitor/devices/{dev_id}", headers=_h(analyst_t), params={"reason": "设备报废下线"})
     assert resp.json()["data"]["message"] == "设备已删除"
 
     log = (await test_session.execute(
@@ -197,12 +197,12 @@ async def test_subnet_auto_gateway_and_delete(client, test_session):
     })
     assert resp.json()["code"] == 0, resp.json()
     alloc_id = resp.json()["data"]["id"]
-    resp = await client.request("DELETE", f"/api/v1/monitor/subnets/{subnet['id']}", headers=_h(manager_t), json={"reason": "x"})
+    resp = await client.request("DELETE", f"/api/v1/monitor/subnets/{subnet['id']}", headers=_h(manager_t), params={"reason": "x"})
     assert resp.json()["code"] == 40900
 
     # 释放后删除成功，删除原因落审计
     await client.delete(f"/api/v1/monitor/allocations/{alloc_id}", headers=_h(manager_t))
-    resp = await client.request("DELETE", f"/api/v1/monitor/subnets/{subnet['id']}", headers=_h(manager_t), json={"reason": "网段规划调整"})
+    resp = await client.request("DELETE", f"/api/v1/monitor/subnets/{subnet['id']}", headers=_h(manager_t), params={"reason": "网段规划调整"})
     assert resp.json()["code"] == 0, resp.json()
     assert resp.json()["data"]["message"] == "子网已删除"
 
@@ -315,7 +315,7 @@ async def test_scan_failure_and_review_guard(client, monkeypatch):
     analyst_t = await _login(client, "analyst01")
     manager_t = await _login(client, "manager01")
 
-    async def _boom(target, ports, svc):
+    async def _boom(target, ports, svc, scan_options=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr("app.services.scanner._run_nmap", _boom)
@@ -359,7 +359,7 @@ async def test_subnet_overlap_and_nesting_rejected(client):
     resp = await client.post("/api/v1/monitor/subnets", headers=_h(manager_t), json={"name": "independent", "network": net})
     assert resp.json()["code"] == 0, resp.json()
     independent_id = resp.json()["data"]["id"]
-    await client.request("DELETE", f"/api/v1/monitor/subnets/{independent_id}", headers=_h(manager_t), json={"reason": "test cleanup"})
+    await client.request("DELETE", f"/api/v1/monitor/subnets/{independent_id}", headers=_h(manager_t), params={"reason": "test cleanup"})
 
 
 @pytest.mark.asyncio
@@ -397,6 +397,11 @@ async def test_ipam_department_data_scope(client):
     # manager 能看到办公网分配
     resp = await client.get("/api/v1/monitor/allocations", headers=_h(manager_t), params={"size": 50})
     assert office_ip in {a["ip_address"] for a in resp.json()["data"]["items"]}
+
+    # 清理本次创建的数据范围测试分配：若不删，每次运行都在 seed 办公网累积一条 10.0.0.x 残留，
+    # 随机 office_ip 撞旧残留 → 409 → flaky（conftest 的 purpose='数据范围测试' 清理兜底）
+    office_alloc = next(a for a in resp.json()["data"]["items"] if a["ip_address"] == office_ip)
+    await client.delete(f"/api/v1/monitor/allocations/{office_alloc['id']}", headers=_h(manager_t))
 
 
 @pytest.mark.asyncio
@@ -902,7 +907,7 @@ async def test_scan_concurrency_limited(client, test_session, monkeypatch):
     peak = 0
     lock = asyncio.Lock()
 
-    async def _slow_nmap(target, ports, svc):
+    async def _slow_nmap(target, ports, svc, scan_options=None):
         nonlocal active, peak
         async with lock:
             active += 1
@@ -910,7 +915,7 @@ async def test_scan_concurrency_limited(client, test_session, monkeypatch):
         await asyncio.sleep(0.05)
         async with lock:
             active -= 1
-        return 0, SAMPLE_XML
+        return 0, SAMPLE_XML, ""
 
     monkeypatch.setattr("app.services.scanner._run_nmap", _slow_nmap)
 
@@ -993,8 +998,8 @@ async def test_scan_high_risk_auto_alert(client, test_session, monkeypatch):
 
     notified = []
 
-    async def _high_nmap(target, ports, svc):
-        return 0, _HIGH_RISK_XML
+    async def _high_nmap(target, ports, svc, scan_options=None):
+        return 0, _HIGH_RISK_XML, ""
 
     async def _fake_notify(alert_id, title, content, severity):
         notified.append((alert_id, title, severity))
@@ -1002,7 +1007,9 @@ async def test_scan_high_risk_auto_alert(client, test_session, monkeypatch):
     monkeypatch.setattr("app.services.scanner._run_nmap", _high_nmap)
     monkeypatch.setattr("app.services.scanner.notify_alert_task", _fake_notify)
 
-    target = f"10.99.{int(uuid.uuid4().hex[:4], 16) % 200 + 1}.11"
+    # 双段随机目标：10.99.{x}.11 仅 200 个取值，跨运行残留的扫描告警会撞随机目标 → dedup 短路 → flaky。
+    # 双段全随机（约 6.4 万取值）+ conftest 会话启动清理扫描告警，消除跨运行/测试间碰撞
+    target = f"10.{int(uuid.uuid4().hex[:4], 16) % 254 + 1}.{int(uuid.uuid4().hex[:4], 16) % 254 + 1}.11"
     r = ScanReport(target_ip=target, report_type="on_demand", scan_status="pending", generated_by=1)
     test_session.add(r)
     await test_session.commit()
@@ -1128,18 +1135,23 @@ async def test_devices_import_csv(client, test_session):
         f"web-01,10.0.10.11,,,,,,,active\n"   # seed 已存在 IP → 冲突
         f"导入终端C,{ip_b},,,,,,,bad_status\n"  # 非法状态
     )
-    resp = await client.post("/api/v1/monitor/devices/import", headers=_h(manager_t),
-                             files={"file": ("devices.csv", csv_text.encode("utf-8-sig"), "text/csv")})
-    assert resp.json()["code"] == 0, resp.json()
-    data = resp.json()["data"]
-    assert data["created"] == 1
-    assert any("已存在" in e["error"] for e in data["failed"])
-    assert any("非法" in e["error"] for e in data["failed"])
+    try:
+        resp = await client.post("/api/v1/monitor/devices/import", headers=_h(manager_t),
+                                 files={"file": ("devices.csv", csv_text.encode("utf-8-sig"), "text/csv")})
+        assert resp.json()["code"] == 0, resp.json()
+        data = resp.json()["data"]
+        assert data["created"] == 1
+        assert any("已存在" in e["error"] for e in data["failed"])
+        assert any("非法" in e["error"] for e in data["failed"])
 
-    rows = (await test_session.execute(select(Device).where(Device.ip_address == ip_a))).scalars().all()
-    # MACADDR 列由 PG 规范化存储为小写
-    assert len(rows) == 1 and rows[0].name == "导入终端A"
-    assert (rows[0].mac_address or "").lower() == "aa:bb:cc:dd:ee:01"
+        rows = (await test_session.execute(select(Device).where(Device.ip_address == ip_a))).scalars().all()
+        # MACADDR 列由 PG 规范化存储为小写
+        assert len(rows) == 1 and rows[0].name == "导入终端A"
+        assert (rows[0].mac_address or "").lower() == "aa:bb:cc:dd:ee:01"
+    finally:
+        # 自清理：导入测试在 DB 中留下 10.7.x 设备，跨运行累积会与随机 IP 撞车 → flaky
+        await test_session.execute(delete(Device).where(Device.ip_address.in_([ip_a, ip_b])))
+        await test_session.commit()
 
 
 @pytest.mark.asyncio
@@ -1280,8 +1292,8 @@ async def test_scan_alert_dedup_window(client, test_session, monkeypatch):
     """自动告警去重：同 target 高危扫描连续跑两次只产生一条告警，且外部通知只触发一次。"""
     from app.services import scanner as scanner_mod
 
-    async def _high_nmap(target, ports, svc):
-        return 0, _HIGH_RISK_XML
+    async def _high_nmap(target, ports, svc, scan_options=None):
+        return 0, _HIGH_RISK_XML, ""
 
     notified = []
 
@@ -1291,7 +1303,9 @@ async def test_scan_alert_dedup_window(client, test_session, monkeypatch):
     monkeypatch.setattr("app.services.scanner._run_nmap", _high_nmap)
     monkeypatch.setattr("app.services.scanner.notify_alert_task", _fake_notify)
 
-    target = f"10.99.{int(uuid.uuid4().hex[:4], 16) % 200 + 1}.11"
+    # 双段随机目标：10.99.{x}.11 仅 200 个取值，跨运行残留的扫描告警会撞随机目标 → dedup 短路 → flaky。
+    # 双段全随机（约 6.4 万取值）+ conftest 会话启动清理扫描告警，消除跨运行/测试间碰撞
+    target = f"10.{int(uuid.uuid4().hex[:4], 16) % 254 + 1}.{int(uuid.uuid4().hex[:4], 16) % 254 + 1}.11"
     for _ in range(2):
         r = ScanReport(target_ip=target, report_type="on_demand", scan_status="pending", generated_by=1)
         test_session.add(r)
@@ -1344,3 +1358,402 @@ async def test_patrols_list_data_scope(client, test_session):
     item = next(i for i in m_items if i["id"] == p1.id)
     assert item["online_count"] == 1 and item["ghost_count"] == 0 and item["offline_count"] == 0
     assert item["subnet_name"] == "业务网"
+
+
+@pytest.mark.asyncio
+async def test_delete_device_archives_when_referenced(client, test_session):
+    """删除保护：设备被扫描报告引用时归档保留（不再因外键裸 500）。"""
+    analyst_t = await _login(client, "analyst01")
+    ip = _uniq_ip()
+    resp = await client.post("/api/v1/monitor/devices", headers=_h(analyst_t), json={
+        "name": "ref-scanned", "ip_address": ip, "device_type": "server", "status": "active",
+    })
+    assert resp.json()["code"] == 0, resp.json()
+    dev_id = resp.json()["data"]["id"]
+
+    report = ScanReport(device_id=dev_id, target_ip=ip, report_type="on_demand",
+                        scan_status="failed", status="pending_review", generated_by=1, error="x")
+    test_session.add(report)
+    await test_session.commit()
+    try:
+        resp = await client.request("DELETE", f"/api/v1/monitor/devices/{dev_id}", headers=_h(analyst_t), params={"reason": "清理"})
+        assert resp.json()["code"] == 0, resp.json()
+        assert "已归档保留" in resp.json()["data"]["message"]
+        d = await test_session.get(Device, dev_id)
+        assert d.status == "archived"
+    finally:
+        await test_session.execute(delete(ScanReport).where(ScanReport.device_id == dev_id))
+        await test_session.execute(delete(Device).where(Device.id == dev_id))
+        await test_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_get_device_data_scope(client, test_session):
+    """越权防护：dept 范围角色不能读他部门设备详情（与列表端点一致）。"""
+    analyst_t = await _login(client, "analyst01")
+    web = (await test_session.execute(select(Device).where(Device.name == "web-01"))).scalar_one()
+    db = (await test_session.execute(select(Device).where(Device.name == "db-01"))).scalar_one()
+
+    resp = await client.get(f"/api/v1/monitor/devices/{web.id}", headers=_h(analyst_t))  # web-01 属安全运营部
+    assert resp.json()["code"] == 40301, resp.json()
+    resp = await client.get(f"/api/v1/monitor/devices/{db.id}", headers=_h(analyst_t))  # db-01 属攻防实验室
+    assert resp.json()["code"] == 0, resp.json()
+
+
+@pytest.mark.asyncio
+async def test_get_scan_report_scope_and_creator(client, test_session):
+    """扫描报告数据范围：dept 角色不能读他部门设备报告；创建者始终可读自己的无设备报告。"""
+    from app.models import User
+
+    analyst_t = await _login(client, "analyst01")
+    manager_t = await _login(client, "manager01")
+    analyst = (await test_session.execute(select(User).where(User.username == "analyst01"))).scalar_one()
+    manager = (await test_session.execute(select(User).where(User.username == "manager01"))).scalar_one()
+    web = (await test_session.execute(select(Device).where(Device.name == "web-01"))).scalar_one()
+
+    other = ScanReport(device_id=web.id, target_ip="10.0.10.11", report_type="on_demand",
+                       scan_status="completed", status="pending_review", generated_by=manager.id)
+    mine = ScanReport(device_id=None, target_ip="10.0.10.99", report_type="on_demand",
+                      scan_status="completed", status="pending_review", generated_by=analyst.id)
+    test_session.add_all([other, mine])
+    await test_session.commit()
+    try:
+        # dept 角色读他部门设备（web-01 → 安全运营部）的报告 → 403
+        resp = await client.get(f"/api/v1/monitor/scans/reports/{other.id}", headers=_h(analyst_t))
+        assert resp.json()["code"] == 40301, resp.json()
+        # 创建者（manager，all 范围）可读
+        resp = await client.get(f"/api/v1/monitor/scans/reports/{other.id}", headers=_h(manager_t))
+        assert resp.json()["code"] == 0, resp.json()
+        # 无设备报告：创建者（analyst）可读，他人（manager）也可读（all 范围）
+        resp = await client.get(f"/api/v1/monitor/scans/reports/{mine.id}", headers=_h(analyst_t))
+        assert resp.json()["code"] == 0, resp.json()
+    finally:
+        await test_session.execute(delete(ScanReport).where(ScanReport.id.in_([other.id, mine.id])))
+        await test_session.commit()
+
+
+# ---------- 批次3：输入校验与裸 500 治理 ----------
+@pytest.mark.asyncio
+async def test_device_mac_format_validation(client, test_session):
+    """设备 MAC 格式校验（批次3）：非法 MAC 创建/更新 → 40001。"""
+    manager_t = await _login(client, "manager01")
+    ip = _uniq_ip()
+    resp = await client.post("/api/v1/monitor/devices", headers=_h(manager_t), json={
+        "name": "bad-mac", "ip_address": ip, "mac_address": "ZZ:ZZ:00:11:22", "device_type": "server",
+    })
+    assert resp.json()["code"] == 40001, resp.json()
+    assert "MAC 地址格式" in resp.json()["message"]
+
+    # 合法 MAC 创建成功，随后更新为非法 → 40001
+    good_mac = f"02:{uuid.uuid4().hex[:2].upper()}:{uuid.uuid4().hex[:2].upper()}:AA:BB:CC"
+    resp = await client.post("/api/v1/monitor/devices", headers=_h(manager_t), json={
+        "name": "good-mac", "ip_address": ip, "mac_address": good_mac, "device_type": "server",
+    })
+    assert resp.json()["code"] == 0, resp.json()
+    dev_id = resp.json()["data"]["id"]
+    try:
+        resp = await client.put(f"/api/v1/monitor/devices/{dev_id}", headers=_h(manager_t),
+                                json={"mac_address": "nope"})
+        assert resp.json()["code"] == 40001, resp.json()
+    finally:
+        await test_session.execute(delete(Device).where(Device.id == dev_id))
+        await test_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_subnet_gateway_format_validation(client):
+    """子网网关格式校验（批次3）：非法 gateway → 40001。"""
+    manager_t = await _login(client, "manager01")
+    net = f"10.210.{int(uuid.uuid4().hex[:4], 16) % 240 + 1}.0/24"
+    resp = await client.post("/api/v1/monitor/subnets", headers=_h(manager_t), json={
+        "name": "bad-gw", "network": net, "gateway": "not-an-ip",
+    })
+    assert resp.json()["code"] == 40001, resp.json()
+    assert "网关格式不正确" in resp.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_allocation_fk_validation(client, test_session):
+    """IP 分配外键校验（批次3）：allocated_to / device_id 不存在 → 40400。"""
+    manager_t = await _login(client, "manager01")
+    net = f"10.211.{int(uuid.uuid4().hex[:4], 16) % 240 + 1}.0/24"
+    resp = await client.post("/api/v1/monitor/subnets", headers=_h(manager_t), json={"name": "fk-net", "network": net})
+    assert resp.json()["code"] == 0, resp.json()
+    subnet_id = resp.json()["data"]["id"]
+    try:
+        resp = await client.post("/api/v1/monitor/allocations", headers=_h(manager_t), json={
+            "subnet_id": subnet_id, "allocated_to": 999999, "allocation_type": "static", "purpose": "坏用户",
+        })
+        assert resp.json()["code"] == 40400, resp.json()
+        assert "分配用户不存在" in resp.json()["message"]
+
+        resp = await client.post("/api/v1/monitor/allocations", headers=_h(manager_t), json={
+            "subnet_id": subnet_id, "device_id": 999999, "allocation_type": "static", "purpose": "坏设备",
+        })
+        assert resp.json()["code"] == 40400, resp.json()
+        assert "绑定设备不存在" in resp.json()["message"]
+    finally:
+        await test_session.execute(delete(IPSubnet).where(IPSubnet.id == subnet_id))
+        await test_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_file_upload_size_precheck(client, monkeypatch):
+    """文件上传内存治理（批次3）：Content-Length 超限预检返回 40001，不读入内存。"""
+    from app.api.v1 import files as files_mod
+
+    monkeypatch.setattr(files_mod.settings, "UPLOAD_MAX_SIZE_MB", 1)
+    manager_t = await _login(client, "manager01")
+    resp = await client.post("/api/v1/files", headers=_h(manager_t),
+                             files={"file": ("big.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * (2 * 1024 * 1024), "image/png")})
+    assert resp.json()["code"] == 40001, resp.json()
+    assert "超过 1MB 限制" in resp.json()["message"]
+
+
+# ---------- 批次4：设备写操作数据范围 ----------
+@pytest.mark.asyncio
+async def test_device_write_scope(client):
+    """设备写操作数据范围（批次4）：dept 角色不能改/删/探测他部门设备，可管理自己创建的设备（自动归属本部门）。"""
+    analyst_t = await _login(client, "analyst01")
+    manager_t = await _login(client, "manager01")
+
+    web = next(
+        d for d in (await client.get("/api/v1/monitor/devices", headers=_h(manager_t), params={"size": 50})).json()["data"]["items"]
+        if d["name"] == "web-01"
+    )
+    # analyst 更新/探测/删除他部门（web-01 → 安全运营部）设备 → 403
+    resp = await client.put(f"/api/v1/monitor/devices/{web['id']}", headers=_h(analyst_t), json={"location": "x"})
+    assert resp.json()["code"] == 40301, resp.json()
+    resp = await client.post(f"/api/v1/monitor/devices/{web['id']}/ping", headers=_h(analyst_t))
+    assert resp.json()["code"] == 40301, resp.json()
+    resp = await client.request("DELETE", f"/api/v1/monitor/devices/{web['id']}", headers=_h(analyst_t), params={"reason": "x"})
+    assert resp.json()["code"] == 40301, resp.json()
+
+    # 自己创建的设备（未指定部门 → 自动归属创建者部门）可更新/探测/删除
+    ip = _uniq_ip()
+    resp = await client.post("/api/v1/monitor/devices", headers=_h(analyst_t), json={
+        "name": "scope-srv", "ip_address": ip, "device_type": "server",
+    })
+    assert resp.json()["code"] == 0, resp.json()
+    dev_id = resp.json()["data"]["id"]
+    assert resp.json()["data"]["department_id"] is not None  # 归属 analyst 所在部门
+    resp = await client.put(f"/api/v1/monitor/devices/{dev_id}", headers=_h(analyst_t), json={"location": "机房A"})
+    assert resp.json()["code"] == 0, resp.json()
+    resp = await client.post(f"/api/v1/monitor/devices/{dev_id}/ping", headers=_h(analyst_t))
+    assert resp.json()["code"] == 0, resp.json()
+    resp = await client.request("DELETE", f"/api/v1/monitor/devices/{dev_id}", headers=_h(analyst_t), params={"reason": "清理"})
+    assert resp.json()["code"] == 0, resp.json()
+
+
+# ==================== 扫描增强：scan_options / NSE / 取消重试 / 基线漂移 ====================
+
+@pytest.mark.asyncio
+async def test_scan_with_scan_options(client, test_session, monkeypatch):
+    """scan_type/port_range/nse 传入 → scan_options 落库，列表与详情可见。"""
+    analyst_t = await _login(client, "analyst01")
+    monkeypatch.setattr("app.services.scanner._run_nmap", _fake_nmap)
+
+    # dept 角色列表按设备部门过滤：关联本部门设备 db-01 保证列表可见
+    db_dev = (await test_session.execute(select(Device).where(Device.name == "db-01"))).scalar_one()
+    resp = await client.post("/api/v1/monitor/scans", headers=_h(analyst_t), json={
+        "target_ip": _scan_ip(), "scan_type": "sT", "port_range": "22,80,443", "nse": False,
+        "device_id": db_dev.id,
+    })
+    assert resp.json()["code"] == 0, resp.json()
+    report_id = resp.json()["data"]["report_id"]
+
+    detail = None
+    for _ in range(200):
+        resp = await client.get(f"/api/v1/monitor/scans/reports/{report_id}", headers=_h(analyst_t))
+        detail = resp.json()["data"]
+        if detail["scan_status"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.05)
+    assert detail["scan_status"] == "completed", detail
+    assert detail["scan_options"]["scan_type"] == "sT"
+    assert detail["scan_options"]["port_range"] == "22,80,443"
+    assert detail["scan_options"]["nse"] is False
+    assert detail["error_code"] is None
+
+    item = (await client.get("/api/v1/monitor/scans/reports", headers=_h(analyst_t))).json()["data"]["items"]
+    row = next(r for r in item if r["id"] == report_id)
+    assert row["scan_options"]["scan_type"] == "sT" and "error_code" in row
+
+
+@pytest.mark.asyncio
+async def test_scan_invalid_port_range_rejected(client, test_session):
+    """非法端口范围（区间越界）与 ports/port_range 互斥 → 业务校验拒绝。"""
+    analyst_t = await _login(client, "analyst01")
+    resp = await client.post("/api/v1/monitor/scans", headers=_h(analyst_t), json={
+        "target_ip": _scan_ip(), "port_range": "0-99999",
+    })
+    assert resp.json()["code"] == 40001
+    resp = await client.post("/api/v1/monitor/scans", headers=_h(analyst_t), json={
+        "target_ip": _scan_ip(), "ports": 100, "port_range": "22,80",
+    })
+    assert resp.json()["code"] == 40001
+
+
+@pytest.mark.asyncio
+async def test_scan_nse_detection(client, test_session, monkeypatch):
+    """NSE 脚本结果 → vulnerabilities 出现 source=nse 条目（真实 CVE 检测）。"""
+    analyst_t = await _login(client, "analyst01")
+    NSE_XML = """<?xml version="1.0"?>
+<nmaprun scanner="nmap" version="7.94">
+  <host><status state="up"/>
+    <ports>
+      <port protocol="tcp" portid="445">
+        <state state="open"/>
+        <service name="microsoft-ds"/>
+        <script id="smb-vuln-ms17-010" output="VULNERABLE: MS17-010 remote code execution"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>
+"""
+
+    async def _nse_nmap(target, ports, svc, scan_options=None):
+        return 0, NSE_XML, ""
+
+    monkeypatch.setattr("app.services.scanner._run_nmap", _nse_nmap)
+
+    resp = await client.post("/api/v1/monitor/scans", headers=_h(analyst_t), json={"target_ip": _scan_ip()})
+    assert resp.json()["code"] == 0, resp.json()
+    report_id = resp.json()["data"]["report_id"]
+
+    detail = None
+    for _ in range(200):
+        resp = await client.get(f"/api/v1/monitor/scans/reports/{report_id}", headers=_h(analyst_t))
+        detail = resp.json()["data"]
+        if detail["scan_status"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.05)
+    assert detail["scan_status"] == "completed", detail
+    assert detail["scan_data"]["nse_scripts"] == "vuln"  # NMAP_NSE_SCRIPTS 默认值
+    nse_vulns = [v for v in detail["scan_data"]["vulnerabilities"] if v["source"] == "nse"]
+    assert any(v["name"] == "smb-vuln-ms17-010" and v["severity"] == "critical" for v in nse_vulns)
+
+
+@pytest.mark.asyncio
+async def test_scan_cancel(client, test_session, monkeypatch):
+    """运行中扫描可取消 → 落 failed/cancelled；已完成/失败任务不可再取消。"""
+    analyst_t = await _login(client, "analyst01")
+
+    async def _slow_nmap_cancel(target, ports, svc, scan_options=None):
+        await asyncio.sleep(30)
+        return 0, SAMPLE_XML, ""
+
+    monkeypatch.setattr("app.services.scanner._run_nmap", _slow_nmap_cancel)
+
+    resp = await client.post("/api/v1/monitor/scans", headers=_h(analyst_t), json={"target_ip": _scan_ip()})
+    report_id = resp.json()["data"]["report_id"]
+
+    running = False
+    for _ in range(200):
+        detail = (await client.get(f"/api/v1/monitor/scans/reports/{report_id}", headers=_h(analyst_t))).json()["data"]
+        if detail["scan_status"] == "running":
+            running = True
+            break
+        await asyncio.sleep(0.05)
+    assert running, "扫描未进入 running 状态"
+
+    resp = await client.post(f"/api/v1/monitor/scans/reports/{report_id}/cancel", headers=_h(analyst_t))
+    assert resp.json()["code"] == 0, resp.json()
+
+    detail = None
+    for _ in range(200):
+        detail = (await client.get(f"/api/v1/monitor/scans/reports/{report_id}", headers=_h(analyst_t))).json()["data"]
+        if detail["scan_status"] == "failed":
+            break
+        await asyncio.sleep(0.05)
+    assert detail["scan_status"] == "failed"
+    assert detail["error_code"] == "cancelled"
+
+    resp = await client.post(f"/api/v1/monitor/scans/reports/{report_id}/cancel", headers=_h(analyst_t))
+    assert resp.json()["code"] == 40001
+
+
+@pytest.mark.asyncio
+async def test_scan_retry(client, test_session, monkeypatch):
+    """失败任务重试 → 恢复 pending 重新执行，沿用原 scan_options，错误被清空。"""
+    analyst_t = await _login(client, "analyst01")
+
+    async def _boom(target, ports, svc, scan_options=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.services.scanner._run_nmap", _boom)
+
+    resp = await client.post("/api/v1/monitor/scans", headers=_h(analyst_t), json={"target_ip": _scan_ip()})
+    report_id = resp.json()["data"]["report_id"]
+
+    for _ in range(200):
+        detail = (await client.get(f"/api/v1/monitor/scans/reports/{report_id}", headers=_h(analyst_t))).json()["data"]
+        if detail["scan_status"] == "failed":
+            break
+        await asyncio.sleep(0.05)
+    assert detail["scan_status"] == "failed" and detail["error_code"] == "generic"
+
+    monkeypatch.setattr("app.services.scanner._run_nmap", _fake_nmap)
+    resp = await client.post(f"/api/v1/monitor/scans/reports/{report_id}/retry", headers=_h(analyst_t))
+    assert resp.json()["code"] == 0, resp.json()
+
+    for _ in range(200):
+        detail = (await client.get(f"/api/v1/monitor/scans/reports/{report_id}", headers=_h(analyst_t))).json()["data"]
+        if detail["scan_status"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.05)
+    assert detail["scan_status"] == "completed", detail
+    assert detail["error"] is None and detail["error_code"] is None
+    assert detail["scan_options"]["scan_type"] == "sS"  # 沿用原选项
+
+    resp = await client.post(f"/api/v1/monitor/scans/reports/{report_id}/retry", headers=_h(analyst_t))
+    assert resp.json()["code"] == 40001
+
+
+@pytest.mark.asyncio
+async def test_scan_baseline_diff(client, test_session, monkeypatch):
+    """同目标两次扫描 → 第二次 scan_data.baseline_diff 对比出新增/关闭端口。"""
+    analyst_t = await _login(client, "analyst01")
+    target = _scan_ip()
+    BASE2_XML = """<?xml version="1.0"?>
+<nmaprun scanner="nmap" version="7.94">
+  <host><status state="up"/>
+    <ports>
+      <port protocol="tcp" portid="22"><state state="open"/>
+        <service name="ssh" product="OpenSSH" version="8.9p1"/></port>
+      <port protocol="tcp" portid="80"><state state="open"/>
+        <service name="http"/></port>
+    </ports>
+  </host>
+</nmaprun>
+"""
+    xmls = [SAMPLE_XML, BASE2_XML]
+
+    async def _seq_nmap(target, ports, svc, scan_options=None):
+        return 0, xmls.pop(0), ""
+
+    monkeypatch.setattr("app.services.scanner._run_nmap", _seq_nmap)
+
+    ids = []
+    for _ in range(2):
+        resp = await client.post("/api/v1/monitor/scans", headers=_h(analyst_t), json={"target_ip": target})
+        assert resp.json()["code"] == 0, resp.json()
+        ids.append(resp.json()["data"]["report_id"])
+
+    details = []
+    for rid in ids:
+        for _ in range(200):
+            d = (await client.get(f"/api/v1/monitor/scans/reports/{rid}", headers=_h(analyst_t))).json()["data"]
+            if d["scan_status"] in ("completed", "failed"):
+                break
+            await asyncio.sleep(0.05)
+        details.append(d)
+    assert details[0]["scan_status"] == details[1]["scan_status"] == "completed"
+
+    # 首次扫描无基线；第二次与首次对比（SAMPLE_XML 含 22/6379，BASE2_XML 含 22/80）
+    assert details[0]["scan_data"]["baseline_diff"] is None
+    diff = details[1]["scan_data"]["baseline_diff"]
+    assert {p["port"] for p in diff["new_ports"]} == {80}
+    assert {p["port"] for p in diff["closed_ports"]} == {6379}
+    assert diff["changed_services"] == []
+    assert "与上次扫描相比" in details[1]["summary"]
